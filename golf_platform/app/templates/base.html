@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<!-- @author Yousuf Yesil <yousufyesil@icloud.com> -->
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Golf-Klassifikations-Plattform{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__brand">🚗 Golf-Plattform</div>
+    <nav class="topbar__nav">
+      <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">Dashboard</a>
+      <a href="/images" class="{{ 'active' if request.url.path == '/images' else '' }}">Bilder</a>
+      <a href="/lots" class="{{ 'active' if request.url.path == '/lots' else '' }}">Anzeigen</a>
+      <a href="/models" class="{{ 'active' if request.url.path == '/models' else '' }}">Modell</a>
+      <a href="/infer" class="{{ 'active' if request.url.path == '/infer' else '' }}">Inferenz</a>
+    </nav>
+  </header>
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js?v={{ asset_version }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

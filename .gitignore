@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+*.log
+
+# Laufzeitdaten -- bleiben extern (siehe README), nicht Teil des Repos
+golf_platform/data/*.json
+golf_images/
+stores/
+lot_staging/

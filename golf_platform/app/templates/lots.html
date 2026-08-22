@@ -1,0 +1,487 @@
+{# @author Yousuf Yesil <yousufyesil@icloud.com> #}
+{% extends "base.html" %}
+{% block title %}Anzeigen · Golf-Plattform{% endblock %}
+{% block content %}
+<h1>Anzeigen zuordnen</h1>
+<p class="hint">lot.csv hochladen, dann die zugehörigen Bilder (Dateiname = file_id, auch als Zip).
+  Jede Anzeige wird als Ganzes einer Klasse zugeordnet; die Bilder wandern dabei in die Galerie und
+  die CSV-Spalten der Anzeige bleiben als Metadaten am Bild — auch im Store. Danach auf
+  <a href="/models">Modell</a> den Store der betroffenen Baureihe neu generieren.</p>
+
+<div class="card">
+  <h2>Import</h2>
+  <div class="lot-import">
+    <div>
+      <div class="dropzone" id="csv-dropzone">
+        <input type="file" id="csv-file" accept=".csv,.tsv,.txt">
+        <div class="dz-icon">📄</div>
+        <div class="dz-title">lot.csv hierher ziehen oder klicken</div>
+        <div class="dz-hint">Spalten: table, lid, title, first_registration, make, model, fuel, body_type, file_id</div>
+      </div>
+      <div id="csv-status"></div>
+    </div>
+    <div>
+      <div class="dropzone" id="img-dropzone">
+        <input type="file" id="img-files" multiple accept=".jpg,.jpeg,.png,.webp,.bmp,.zip">
+        <div class="dz-icon">🖼️</div>
+        <div class="dz-title">Bilder oder Zip hierher ziehen</div>
+        <div class="dz-hint">Dateiname = file_id, z.B. 36916_026a9b06872139374a.webp</div>
+      </div>
+      <div id="img-status"></div>
+    </div>
+  </div>
+  <div class="stat-row" id="lot-stats"></div>
+</div>
+
+<datalist id="marke-options"></datalist>
+<datalist id="baureihe-options"></datalist>
+
+<div class="card">
+  <div class="lot-filter">
+    <div>
+      <label class="hint">Marke</label>
+      <select id="filter-make"><option value="">alle Marken</option></select>
+    </div>
+    <div>
+      <label class="hint">Status</label>
+      <select id="filter-status">
+        <option value="offen">offen</option>
+        <option value="zugeordnet">zugeordnet</option>
+        <option value="alle">alle</option>
+      </select>
+    </div>
+    <div class="lot-filter__search">
+      <label class="hint">Suche</label>
+      <input type="text" id="filter-q" placeholder="Titel, Modell, lid …">
+    </div>
+    <div>
+      <label class="hint">Vorschlag gegen</label>
+      <select id="suggest-baureihe"></select>
+    </div>
+    <div>
+      <label class="hint">&nbsp;</label>
+      <label class="lot-toggle"><input type="checkbox" id="auto-suggest" checked> Vorschläge automatisch</label>
+    </div>
+  </div>
+</div>
+
+<div id="lot-list"><p class="empty-hint">Lade…</p></div>
+<div class="lot-pager" id="lot-pager"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PAGE_SIZE = 20;
+let baureihenData = [];
+let offset = 0;
+let total = 0;
+
+// ---- Vorschlags-Warteschlange: immer nur EINE Inferenz gleichzeitig, damit das
+// Durchscrollen der Liste nicht dutzende GPU-Jobs parallel anwirft.
+const suggestQueue = [];
+let suggestBusy = false;
+const suggested = new Set();
+
+function enqueueSuggest(lid) {
+  if (suggested.has(lid) || suggestQueue.includes(lid)) return;
+  suggestQueue.push(lid);
+  drainSuggestQueue();
+}
+
+async function drainSuggestQueue() {
+  if (suggestBusy) return;
+  const lid = suggestQueue.shift();
+  if (!lid) return;
+  suggestBusy = true;
+  try {
+    await runSuggest(lid);
+  } finally {
+    suggestBusy = false;
+    drainSuggestQueue();
+  }
+}
+
+async function runSuggest(lid) {
+  const card = document.querySelector(`[data-lid="${CSS.escape(lid)}"]`);
+  if (!card) return;
+  const panel = card.querySelector(".lot-suggest");
+  const bars = card.querySelector(".lot-suggest-bars");
+  suggested.add(lid);
+
+  const fd = new FormData();
+  fd.append("baureihe", document.getElementById("suggest-baureihe").value);
+  panel.querySelector(".lot-suggest-label").textContent = "Vorschlag wird berechnet…";
+  try {
+    const res = await api(`/api/lots/${encodeURIComponent(lid)}/suggest`, { method: "POST", body: fd });
+    const agg = res.aggregate || (res.per_image.length ? { pred: res.per_image[0].pred, prob: res.per_image[0].prob, conf: res.per_image[0].conf } : null);
+    if (!agg) {
+      panel.querySelector(".lot-suggest-label").textContent = "Kein Vorschlag möglich.";
+      return;
+    }
+    panel.querySelector(".lot-suggest-label").innerHTML =
+      `Vorschlag: <strong>${escapeHtml(agg.pred)}</strong> (${formatPercent(agg.conf)})`;
+    renderBars(bars, agg.prob, { top: 3, predicted: agg.pred });
+
+    // Vorschlag nur vorauswählen, solange nichts Eigenes gewählt wurde.
+    const select = card.querySelector(".lot-class-select");
+    if (!select.value && [...select.options].some(o => o.value === agg.pred)) select.value = agg.pred;
+  } catch (err) {
+    panel.querySelector(".lot-suggest-label").innerHTML = `<span class="error-text">${escapeHtml(err.message)}</span>`;
+  }
+}
+
+// Vorschlag erst anfordern, wenn die Karte wirklich sichtbar wird.
+const observer = new IntersectionObserver((entries) => {
+  if (!document.getElementById("auto-suggest").checked) return;
+  for (const entry of entries) {
+    if (entry.isIntersecting && !entry.target.dataset.klasse) enqueueSuggest(entry.target.dataset.lid);
+  }
+}, { rootMargin: "200px" });
+
+// ---- Rendering ----
+
+function classOptions(selected) {
+  return baureihenData.map(b => `
+    <optgroup label="${escapeHtml(b.marke)} · ${escapeHtml(b.baureihe)}">
+      ${b.klassen.map(k => `<option value="${escapeHtml(k.name)}" ${k.name === selected ? "selected" : ""}>${escapeHtml(k.name)}</option>`).join("")}
+    </optgroup>`).join("");
+}
+
+function lotCard(lot) {
+  const felder = [
+    ["Erstzulassung", lot.first_registration], ["Kraftstoff", lot.fuel],
+    ["Karosserie", lot.body_type], ["Tabelle", lot.table], ["lid", lot.lid],
+  ].filter(([, v]) => v);
+
+  const bilder = lot.images.map(img => img.status === "fehlt"
+    ? `<div class="lot-thumb lot-thumb--missing" title="${escapeHtml(img.file_id)} fehlt">
+         <span>fehlt</span><small>${escapeHtml(img.file_id)}</small>
+       </div>`
+    : `<figure class="lot-thumb">
+         <img src="${img.status === "zugeordnet"
+             ? `/api/classes/${encodeURIComponent(lot.klasse)}/images/${encodeURIComponent((img.assigned_file || "").split("/").pop())}/file`
+             : `/api/lots/${encodeURIComponent(lot.lid)}/images/${encodeURIComponent(img.slug)}/file`}" loading="lazy">
+         <figcaption title="${escapeHtml(img.file_id)}">${escapeHtml(img.file_id)}</figcaption>
+       </figure>`).join("");
+
+  const aktion = lot.klasse
+    ? `<div class="lot-assigned">
+         <span class="badge good">&#10003;</span> zugeordnet: <strong>${escapeHtml(lot.klasse)}</strong>
+         <button class="btn secondary lot-unassign-btn">Zuordnung aufheben</button>
+       </div>`
+    : `<div class="lot-actions">
+         <select class="lot-class-select">
+           <option value="">Klasse wählen …</option>
+           ${classOptions(null)}
+         </select>
+         <button class="btn lot-assign-btn">Zuordnen</button>
+         <button class="btn secondary nk-open-btn" type="button">+ Neue Klasse</button>
+         <button class="btn secondary lot-suggest-btn">Vorschlag</button>
+         <button class="btn danger lot-delete-btn">Verwerfen</button>
+       </div>
+       <div class="lot-newklasse hidden">
+         <input type="text" class="nk-marke" list="marke-options" placeholder="Marke (z.B. Volkswagen)">
+         <input type="text" class="nk-baureihe" list="baureihe-options" placeholder="Baureihe (z.B. Golf)">
+         <input type="text" class="nk-klasse" placeholder="Klasse (z.B. GOLF IX)">
+         <button class="btn nk-create-btn" type="button">Anlegen</button>
+         <button class="btn secondary nk-cancel-btn" type="button">Abbrechen</button>
+         <div class="nk-status"></div>
+       </div>
+       <div class="lot-suggest">
+         <div class="lot-suggest-label hint">noch kein Vorschlag</div>
+         <div class="lot-suggest-bars"></div>
+       </div>`;
+
+  return `
+    <div class="card lot-card" data-lid="${escapeHtml(lot.lid)}" data-klasse="${escapeHtml(lot.klasse || "")}"
+         data-make="${escapeHtml(lot.make || "")}" data-model="${escapeHtml(lot.model || "")}">
+      <div class="lot-head">
+        <div>
+          <h2>${escapeHtml(lot.make || "—")} ${escapeHtml(lot.model || "")}</h2>
+          <div class="lot-title">${escapeHtml(lot.title || "")}</div>
+        </div>
+        <div class="lot-count">${lot.n_images} Bild${lot.n_images === 1 ? "" : "er"}${lot.n_fehlt ? ` · <span class="error-text">${lot.n_fehlt} fehlen</span>` : ""}</div>
+      </div>
+      <div class="lot-fields">${felder.map(([k, v]) => `<span><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</span>`).join("")}</div>
+      <div class="lot-thumbs">${bilder}</div>
+      <div class="lot-status"></div>
+      ${aktion}
+    </div>`;
+}
+
+function wireCard(card) {
+  const lid = card.dataset.lid;
+  const status = card.querySelector(".lot-status");
+
+  const run = async (fn) => {
+    status.innerHTML = `<p class="hint">Bitte warten…</p>`;
+    try {
+      await fn();
+      await loadLots();
+      await loadStats();
+    } catch (err) {
+      status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+    }
+  };
+
+  card.querySelector(".lot-assign-btn")?.addEventListener("click", () => {
+    const klasse = card.querySelector(".lot-class-select").value;
+    if (!klasse) {
+      status.innerHTML = `<p class="error-text">Erst eine Klasse wählen.</p>`;
+      return;
+    }
+    run(() => {
+      const fd = new FormData();
+      fd.append("klasse", klasse);
+      return api(`/api/lots/${encodeURIComponent(lid)}/assign`, { method: "POST", body: fd });
+    });
+  });
+
+  card.querySelector(".lot-unassign-btn")?.addEventListener("click", () => {
+    if (!confirm("Zuordnung aufheben? Die Bilder wandern zurück in den Anzeigen-Bereich und verschwinden aus der Galerie.")) return;
+    run(() => api(`/api/lots/${encodeURIComponent(lid)}/unassign`, { method: "POST" }));
+  });
+
+  card.querySelector(".lot-delete-btn")?.addEventListener("click", () => {
+    if (!confirm("Anzeige verwerfen? Die hochgeladenen Bilder dieser Anzeige werden gelöscht.")) return;
+    run(() => api(`/api/lots/${encodeURIComponent(lid)}`, { method: "DELETE" }));
+  });
+
+  card.querySelector(".lot-suggest-btn")?.addEventListener("click", () => {
+    suggested.delete(lid);
+    enqueueSuggest(lid);
+  });
+
+  const select = card.querySelector(".lot-class-select");
+  const newklasse = card.querySelector(".lot-newklasse");
+  card.querySelector(".nk-open-btn")?.addEventListener("click", () => {
+    newklasse.classList.remove("hidden");
+    newklasse.querySelector(".nk-marke").value = card.dataset.make || "";
+    newklasse.querySelector(".nk-baureihe").value = "";
+    newklasse.querySelector(".nk-klasse").value = card.dataset.model || "";
+    newklasse.querySelector(".nk-klasse").focus();
+  });
+
+  newklasse?.querySelector(".nk-cancel-btn").addEventListener("click", () => {
+    newklasse.classList.add("hidden");
+    newklasse.querySelector(".nk-status").innerHTML = "";
+  });
+
+  newklasse?.querySelector(".nk-create-btn").addEventListener("click", async () => {
+    const marke = newklasse.querySelector(".nk-marke").value.trim();
+    const baureihe = newklasse.querySelector(".nk-baureihe").value.trim();
+    const klasse = newklasse.querySelector(".nk-klasse").value.trim();
+    const nkStatus = newklasse.querySelector(".nk-status");
+    if (!marke || !baureihe || !klasse) {
+      nkStatus.innerHTML = `<p class="error-text">Marke, Baureihe und Klasse ausfüllen.</p>`;
+      return;
+    }
+    nkStatus.innerHTML = `<p class="hint">Lege Klasse an…</p>`;
+    try {
+      const fd = new FormData();
+      fd.append("marke", marke);
+      fd.append("baureihe", baureihe);
+      fd.append("klasse", klasse);
+      await api("/api/classes", { method: "POST", body: fd });
+      await loadBaureihen();
+      refreshAllClassSelects();
+      select.value = klasse;
+      newklasse.classList.add("hidden");
+      nkStatus.innerHTML = "";
+    } catch (err) {
+      nkStatus.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+    }
+  });
+
+  if (!card.dataset.klasse) observer.observe(card);
+}
+
+async function loadLots() {
+  const list = document.getElementById("lot-list");
+  const params = new URLSearchParams({
+    make: document.getElementById("filter-make").value,
+    status: document.getElementById("filter-status").value,
+    q: document.getElementById("filter-q").value.trim(),
+    offset, limit: PAGE_SIZE,
+  });
+  list.innerHTML = `<p class="empty-hint">Lade…</p>`;
+
+  const res = await api(`/api/lots?${params}`);
+  total = res.total;
+  if (!res.lots.length) {
+    list.innerHTML = `<p class="empty-hint">Keine Anzeigen — oben eine lot.csv hochladen oder den Filter ändern.</p>`;
+    renderPager();
+    return;
+  }
+
+  suggestQueue.length = 0;
+  list.innerHTML = res.lots.map(lotCard).join("");
+  list.querySelectorAll(".lot-card").forEach(wireCard);
+  renderPager();
+}
+
+function renderPager() {
+  const pager = document.getElementById("lot-pager");
+  const von = total ? offset + 1 : 0;
+  const bis = Math.min(offset + PAGE_SIZE, total);
+  pager.innerHTML = `
+    <button class="btn secondary" id="prev-page" ${offset === 0 ? "disabled" : ""}>← zurück</button>
+    <span class="hint">${von}–${bis} von ${total}</span>
+    <button class="btn secondary" id="next-page" ${bis >= total ? "disabled" : ""}>weiter →</button>`;
+  document.getElementById("prev-page").addEventListener("click", () => {
+    offset = Math.max(0, offset - PAGE_SIZE);
+    loadLots();
+  });
+  document.getElementById("next-page").addEventListener("click", () => {
+    offset += PAGE_SIZE;
+    loadLots();
+  });
+}
+
+async function loadStats() {
+  const s = await api("/api/lots/stats");
+  document.getElementById("lot-stats").innerHTML = `
+    <div class="stat-tile"><div class="label">Anzeigen offen</div><div class="value">${s.anzeigen_offen}</div></div>
+    <div class="stat-tile"><div class="label">zugeordnet</div><div class="value">${s.anzeigen_zugeordnet}</div></div>
+    <div class="stat-tile"><div class="label">Bilder im Import</div><div class="value">${s.bilder_staging}</div></div>
+    <div class="stat-tile"><div class="label">Bilder fehlend</div><div class="value">${s.bilder_fehlend}</div></div>`;
+}
+
+async function loadMakes() {
+  const makes = await api("/api/lots/makes");
+  const select = document.getElementById("filter-make");
+  const current = select.value;
+  select.innerHTML = `<option value="">alle Marken</option>` +
+    makes.map(m => `<option value="${escapeHtml(m.make)}">${escapeHtml(m.make)} (${m.offen} offen / ${m.gesamt})</option>`).join("");
+  select.value = current;
+}
+
+async function loadBaureihen() {
+  const all = await api("/api/baureihen");
+  baureihenData = all.filter(b => !b.is_global);
+  // Der Vorschlag läuft gegen EINEN Store; "Gesamt" (alle Marken) ist bei einer
+  // nach Marke gefilterten Anzeigen-Liste die sinnvolle Voreinstellung.
+  document.getElementById("suggest-baureihe").innerHTML = all
+    .filter(b => b.store.exists)
+    .map(b => `<option value="${escapeHtml(b.baureihe)}">${escapeHtml(b.baureihe)}</option>`).join("")
+    || `<option value="">kein Store vorhanden</option>`;
+
+  const markes = [...new Set(baureihenData.map(b => b.marke))].sort();
+  const baureihen = [...new Set(baureihenData.map(b => b.baureihe))].sort();
+  document.getElementById("marke-options").innerHTML = markes.map(m => `<option value="${escapeHtml(m)}">`).join("");
+  document.getElementById("baureihe-options").innerHTML = baureihen.map(b => `<option value="${escapeHtml(b)}">`).join("");
+}
+
+// Baut die Klassen-Dropdowns aller gerade angezeigten Karten neu auf (nach dem
+// Anlegen einer neuen Klasse), ohne die ganze Liste neu zu laden -- erhält dabei
+// die jeweils schon gewählte Klasse je Karte.
+function refreshAllClassSelects() {
+  document.querySelectorAll(".lot-class-select").forEach(select => {
+    const current = select.value;
+    select.innerHTML = `<option value="">Klasse wählen …</option>${classOptions(current)}`;
+  });
+}
+
+// ---- Import ----
+
+async function uploadCsv(files) {
+  const status = document.getElementById("csv-status");
+  const fd = new FormData();
+  fd.append("file", files[0]);
+  status.innerHTML = `<p class="hint">Lese ${escapeHtml(files[0].name)} …</p>`;
+  try {
+    const r = await api("/api/lots/csv", { method: "POST", body: fd });
+    status.innerHTML = `<p class="hint">${r.zeilen} Zeilen · ${r.neue_anzeigen} neue Anzeigen · ` +
+      `${r.ergaenzte_anzeigen} ergänzt · ${r.uebersprungen_zugeordnet} bereits zugeordnet (übersprungen).</p>`;
+    offset = 0;
+    await Promise.all([loadMakes(), loadStats()]);
+    await loadLots();
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+const IMG_UPLOAD_BATCH = 50;
+const IMG_UPLOAD_RETRIES = 6;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Serverseitig ist ein erneuter Upload derselben Datei unschädlich (image_service /
+// lot_service überschreiben eine bereits vorhandene Datei mit gleichem Dateinamen
+// und zählen sie als "ersetzt" statt sie zu duplizieren) -> ein Batch, der wegen
+// eines Netzwerkfehlers fehlschlägt, kann gefahrlos erneut gesendet werden.
+async function uploadBatchWithRetry(batch) {
+  for (let attempt = 1; ; attempt++) {
+    const fd = new FormData();
+    for (const f of batch) fd.append("files", f);
+    try {
+      return await api("/api/lots/images", { method: "POST", body: fd });
+    } catch (err) {
+      if (attempt >= IMG_UPLOAD_RETRIES) throw err;
+      await sleep(500 * attempt);
+    }
+  }
+}
+
+async function uploadLotImages(files) {
+  const status = document.getElementById("img-status");
+  const all = [...files];
+  // In Batches hochladen statt alles in einer Anfrage, sonst gibt es bei
+  // tausenden Dateien bis zum Ende keinerlei Rückmeldung.
+  const batches = [];
+  for (let i = 0; i < all.length; i += IMG_UPLOAD_BATCH) batches.push(all.slice(i, i + IMG_UPLOAD_BATCH));
+
+  const totals = { gespeichert: 0, ersetzt: 0, unbekannt: 0, unbekannte_dateien: [] };
+  const renderProgress = (done) => `
+    <div class="progress-track"><div class="progress-fill" style="width:${(done / all.length * 100).toFixed(1)}%"></div></div>
+    <p class="hint">${done} von ${all.length} Datei(en) hochgeladen…</p>`;
+  status.innerHTML = renderProgress(0);
+
+  // Warnt vor dem Verlassen der Seite waehrend des Uploads -- ein Reload killt
+  // den laufenden Loop sonst kommentarlos mitten im Batch.
+  const guardUnload = (e) => { e.preventDefault(); e.returnValue = ""; };
+  window.addEventListener("beforeunload", guardUnload);
+
+  let done = 0;
+  try {
+    for (const batch of batches) {
+      const r = await uploadBatchWithRetry(batch);
+      totals.gespeichert += r.gespeichert;
+      totals.ersetzt += r.ersetzt;
+      totals.unbekannt += r.unbekannt;
+      if (totals.unbekannte_dateien.length < 3) totals.unbekannte_dateien.push(...r.unbekannte_dateien);
+      done += batch.length;
+      status.innerHTML = renderProgress(done);
+    }
+    status.innerHTML = `<p class="hint">${totals.gespeichert} neu · ${totals.ersetzt} ersetzt` +
+      (totals.unbekannt ? ` · <span class="error-text">${totals.unbekannt} ohne passende Anzeige (${escapeHtml(totals.unbekannte_dateien.slice(0, 3).join(", "))}…)</span>` : "") + `</p>`;
+    await loadStats();
+    await loadLots();
+  } catch (err) {
+    status.innerHTML = renderProgress(done) +
+      `<p class="error-text">${escapeHtml(err.message)} — Upload einfach mit denselben Dateien erneut starten,
+       bereits hochgeladene werden dabei nur ersetzt statt dupliziert.</p>`;
+    await loadStats();
+  } finally {
+    window.removeEventListener("beforeunload", guardUnload);
+  }
+}
+
+setupDropzone(document.getElementById("csv-dropzone"), uploadCsv);
+setupDropzone(document.getElementById("img-dropzone"), uploadLotImages);
+
+["filter-make", "filter-status"].forEach(id =>
+  document.getElementById(id).addEventListener("change", () => { offset = 0; loadLots(); }));
+
+let searchTimer = null;
+document.getElementById("filter-q").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { offset = 0; loadLots(); }, 300);
+});
+
+(async () => {
+  await Promise.all([loadBaureihen(), loadMakes(), loadStats()]);
+  await loadLots();
+})();
+</script>
+{% endblock %}

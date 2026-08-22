@@ -1,0 +1,374 @@
+{# @author Yousuf Yesil <yousufyesil@icloud.com> #}
+{% extends "base.html" %}
+{% block title %}Modell · Golf-Plattform{% endblock %}
+{% block content %}
+<h1>Modell &amp; Embedding-Stores</h1>
+<p class="hint">Ein Vision-Encoder (<code>google/siglip2-so400m-patch16-384</code>), aber ein eigener Store je
+  Baureihe. "Store neu generieren" embedded alle handgeprüften Bilder (train/test + Uploads) der gewählten
+  Baureihe neu und überschreibt deren Store. Zusätzlich gibt es den Eintrag <strong>"Gesamt"</strong>: ein
+  Store über alle Bilder aller Marken &amp; Baureihen hinweg, für baureihenübergreifende Ähnlichkeitssuche.
+  Er lässt sich hier bauen und ist danach auch im Dashboard und bei der Inferenz als Auswahl verfügbar.</p>
+
+<div class="card">
+  <div class="baureihe-select-row">
+    <label class="hint">Baureihe</label>
+    <select id="model-baureihe"></select>
+    <button id="rebuild-btn" class="btn">Store neu generieren</button>
+    <button id="download-baureihe-btn" class="btn secondary">⬇ Bilder + CSV herunterladen</button>
+    <button id="delete-baureihe-btn" class="btn danger">🗑 Baureihe löschen</button>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat-tile"><div class="label">Klassen</div><div class="value" id="stat-klassen">–</div></div>
+    <div class="stat-tile"><div class="label">Bilder im Store</div><div class="value" id="stat-n">–</div></div>
+    <div class="stat-tile"><div class="label">Dimension</div><div class="value" id="stat-dim">–</div></div>
+    <div class="stat-tile"><div class="label">Zuletzt gebaut</div><div class="value" id="stat-built" style="font-size:16px">–</div></div>
+  </div>
+
+  <div id="job-row" style="display:none; margin-top:16px">
+    <div class="progress-track"><div class="progress-fill" id="job-fill" style="width:0%"></div></div>
+    <div class="hint" id="job-status"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="toolbar-row">
+    <h2 style="margin:0">Cluster-Ansicht (UMAP)</h2>
+    <div class="toolbar-actions">
+      <button id="umap-reset-btn" class="btn secondary" style="display:none">Zoom zurücksetzen</button>
+      <button id="umap-btn" class="btn secondary" disabled>Cluster anzeigen</button>
+    </div>
+  </div>
+  <p class="hint">Projiziert die Store-Embeddings der gewählten Baureihe mit UMAP auf 2D — je näher zwei
+    Punkte, desto ähnlicher sind sich die Bilder für den Encoder. Farbe = Klasse; gut getrennte Farbgruppen
+    deuten auf eine zuverlässige kNN-Klassifikation hin, einzelne Ausreißer in einer fremden Farbgruppe oft auf
+    eine falsch einsortierte Klasse. Mit dem Mausrad zoomen (z.B. bei übereinanderliegenden Punkten), Ziehen
+    verschiebt den Ausschnitt, ein Klick auf einen Punkt öffnet das Bild in der Daten-Übersicht.</p>
+  <p class="hint" id="umap-empty">Noch keine Projektion berechnet.</p>
+  <p class="hint" id="umap-loading" style="display:none">Berechne UMAP-Projektion…</p>
+  <div class="umap-wrap" id="umap-wrap" style="display:none">
+    <svg class="umap-svg" id="umap-svg" viewBox="0 0 640 480"></svg>
+    <div class="umap-tooltip" id="umap-tooltip"></div>
+    <div class="umap-legend" id="umap-legend"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let baureihenData = [];
+
+async function loadBaureihen(selectAfter) {
+  baureihenData = await api("/api/baureihen");
+  const select = document.getElementById("model-baureihe");
+  const prev = selectAfter || select.value;
+  select.innerHTML = baureihenData.length
+    ? baureihenData.map(b => `<option value="${escapeHtml(b.baureihe)}">${escapeHtml(b.baureihe)} (${escapeHtml(b.marke)})</option>`).join("")
+    : `<option value="">Noch keine Baureihen — zuerst im Daten-Bereich eine Klasse anlegen</option>`;
+  if (prev) select.value = prev;
+  renderStatus();
+}
+
+function renderStatus() {
+  const baureihe = document.getElementById("model-baureihe").value;
+  const b = baureihenData.find(x => x.baureihe === baureihe);
+  document.getElementById("rebuild-btn").disabled = !b;
+  document.getElementById("download-baureihe-btn").disabled = !b;
+  document.getElementById("delete-baureihe-btn").disabled = !b || b.is_global;
+  document.getElementById("umap-btn").disabled = !b || !b.store.exists;
+  if (!b) return;
+  document.getElementById("stat-klassen").textContent = b.klassen.length;
+  document.getElementById("stat-n").textContent = b.store.n_images ?? "–";
+  document.getElementById("stat-dim").textContent = b.store.dim ?? "–";
+  document.getElementById("stat-built").textContent = b.store.built_at ? new Date(b.store.built_at).toLocaleString("de-DE") : "noch nie";
+}
+
+document.getElementById("model-baureihe").addEventListener("change", () => {
+  renderStatus();
+  resetUmap();
+});
+loadBaureihen();
+
+document.getElementById("download-baureihe-btn").addEventListener("click", () => {
+  const baureihe = document.getElementById("model-baureihe").value;
+  if (!baureihe) return;
+  window.location.href = `/api/baureihen/${encodeURIComponent(baureihe)}/download`;
+});
+
+document.getElementById("delete-baureihe-btn").addEventListener("click", async () => {
+  const baureihe = document.getElementById("model-baureihe").value;
+  if (!baureihe) return;
+  if (!confirm(`Baureihe "${baureihe}" mit allen Klassen, Uploads und Store endgültig löschen?`)) return;
+  await api(`/api/baureihen/${encodeURIComponent(baureihe)}`, { method: "DELETE" });
+  await loadBaureihen();
+});
+
+document.getElementById("rebuild-btn").addEventListener("click", async () => {
+  const baureihe = document.getElementById("model-baureihe").value;
+  if (!baureihe) return;
+  const btn = document.getElementById("rebuild-btn");
+  btn.disabled = true;
+  try {
+    const { job_id } = await api(`/api/baureihen/${encodeURIComponent(baureihe)}/rebuild`, { method: "POST" });
+    document.getElementById("job-row").style.display = "block";
+    pollJob(job_id, baureihe);
+  } catch (e) {
+    alert(e.message);
+    btn.disabled = false;
+  }
+});
+
+async function pollJob(jobId, baureihe) {
+  const fill = document.getElementById("job-fill");
+  const status = document.getElementById("job-status");
+  const tick = async () => {
+    const job = await api(`/api/jobs/${jobId}`);
+    const pct = job.total ? Math.round((job.processed / job.total) * 100) : 0;
+    fill.style.width = `${pct}%`;
+    status.textContent = job.status === "running" ? `${job.processed}/${job.total} Bilder (${pct}%)`
+      : job.status === "done" ? "fertig"
+      : `Fehler: ${job.error}`;
+    if (job.status === "running") {
+      setTimeout(tick, 1500);
+    } else {
+      document.getElementById("rebuild-btn").disabled = false;
+      resetUmap();
+      setTimeout(() => loadBaureihen(baureihe), 1000);
+    }
+  };
+  tick();
+}
+
+// Fixe Farbreihenfolge (dataviz-Palette, s. style.css --cat-1..8): Klassen
+// werden nach Häufigkeit sortiert den 8 Slots zugewiesen; alles darüber
+// hinaus fällt in einen einzigen Sammel-Slot "Andere" statt eine 9. Farbe
+// zu erzeugen.
+const UMAP_COLORS = ["var(--cat-1)", "var(--cat-2)", "var(--cat-3)", "var(--cat-4)",
+  "var(--cat-5)", "var(--cat-6)", "var(--cat-7)", "var(--cat-8)"];
+
+let umapAbort = null; // bricht die Pointer/Wheel-Listener des vorherigen Renders ab, damit sie beim erneuten Klick auf "Cluster anzeigen" nicht mehrfach registriert werden
+
+function resetUmap() {
+  document.getElementById("umap-wrap").style.display = "none";
+  document.getElementById("umap-loading").style.display = "none";
+  document.getElementById("umap-reset-btn").style.display = "none";
+  const empty = document.getElementById("umap-empty");
+  empty.textContent = "Noch keine Projektion berechnet.";
+  empty.style.display = "block";
+  if (umapAbort) { umapAbort.abort(); umapAbort = null; }
+}
+
+document.getElementById("umap-btn").addEventListener("click", async () => {
+  const baureihe = document.getElementById("model-baureihe").value;
+  if (!baureihe) return;
+  const btn = document.getElementById("umap-btn");
+  const empty = document.getElementById("umap-empty");
+  const loading = document.getElementById("umap-loading");
+  const wrap = document.getElementById("umap-wrap");
+  btn.disabled = true;
+  empty.style.display = "none";
+  wrap.style.display = "none";
+  loading.style.display = "block";
+  try {
+    const { points } = await api(`/api/baureihen/${encodeURIComponent(baureihe)}/umap`);
+    renderUmap(points);
+    wrap.style.display = "block";
+  } catch (e) {
+    empty.textContent = e.message;
+    empty.style.display = "block";
+  } finally {
+    loading.style.display = "none";
+    btn.disabled = false;
+  }
+});
+
+const UMAP_MIN_SCALE = 1;
+const UMAP_MAX_SCALE = 20;
+
+function renderUmap(points) {
+  const svg = document.getElementById("umap-svg");
+  const legend = document.getElementById("umap-legend");
+  const W = 640, H = 480, PAD = 24;
+
+  const xs = points.map(p => p.x), ys = points.map(p => p.y);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMin = Math.min(...ys), yMax = Math.max(...ys);
+  // "Basis"-Layout (Zoomstufe 1, kein Pan) — fixe Referenz, auf die die aktuelle
+  // Zoom/Pan-Transformation (view.scale/tx/ty) bei jedem Redraw angewendet wird.
+  const basePoints = points.map(p => ({
+    bx: PAD + (xMax > xMin ? (p.x - xMin) / (xMax - xMin) : 0.5) * (W - 2 * PAD),
+    by: PAD + (yMax > yMin ? (p.y - yMin) / (yMax - yMin) : 0.5) * (H - 2 * PAD),
+  }));
+
+  const counts = new Map();
+  for (const p of points) counts.set(p.class, (counts.get(p.class) || 0) + 1);
+  const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([cls]) => cls);
+  const colorOf = new Map();
+  ordered.forEach((cls, i) => colorOf.set(cls, i < UMAP_COLORS.length ? UMAP_COLORS[i] : "var(--cat-other)"));
+
+  svg.innerHTML = points.map((p, i) => {
+    return `<circle class="umap-hit" data-i="${i}" r="12"></circle>`
+      + `<circle class="umap-dot" data-i="${i}" style="fill:${colorOf.get(p.class)}"></circle>`;
+  }).join("");
+  const hits = svg.querySelectorAll(".umap-hit");
+  const dots = svg.querySelectorAll(".umap-dot");
+
+  // Radius der Punkte bleibt beim Zoomen konstant (nur cx/cy werden reskaliert) —
+  // sonst würden bisher überlappende Punkte beim Reinzoomen nicht auseinanderrücken,
+  // weil Abstand UND Punktgröße gleichermaßen mitwachsen würden.
+  const view = { scale: 1, tx: 0, ty: 0 };
+  function redraw() {
+    for (let i = 0; i < basePoints.length; i++) {
+      const x = basePoints[i].bx * view.scale + view.tx;
+      const y = basePoints[i].by * view.scale + view.ty;
+      hits[i].setAttribute("cx", x);
+      hits[i].setAttribute("cy", y);
+      dots[i].setAttribute("cx", x);
+      dots[i].setAttribute("cy", y);
+    }
+  }
+  redraw();
+
+  const top = ordered.slice(0, UMAP_COLORS.length);
+  const rest = ordered.slice(UMAP_COLORS.length);
+  const legendItems = top.map((cls, i) => ({ label: cls, color: UMAP_COLORS[i], count: counts.get(cls) }));
+  if (rest.length) {
+    legendItems.push({
+      label: `Andere (${rest.length} Klassen)`,
+      color: "var(--cat-other)",
+      count: rest.reduce((s, cls) => s + counts.get(cls), 0),
+    });
+  }
+  legend.innerHTML = legendItems.map(item => `
+    <div class="umap-legend-item">
+      <span class="umap-legend-swatch" style="background:${item.color}"></span>
+      <span></span>
+    </div>`).join("");
+  legend.querySelectorAll(".umap-legend-item span:last-child").forEach((el, i) => {
+    el.textContent = `${legendItems[i].label} (${legendItems[i].count})`;
+  });
+
+  const resetBtn = document.getElementById("umap-reset-btn");
+  resetBtn.style.display = "inline-block";
+  resetBtn.onclick = () => { view.scale = 1; view.tx = 0; view.ty = 0; redraw(); };
+
+  wireUmapInteraction(svg, points, view, redraw);
+}
+
+function wireUmapInteraction(svg, points, view, redraw) {
+  const tooltip = document.getElementById("umap-tooltip");
+  const wrap = document.getElementById("umap-wrap");
+
+  if (umapAbort) umapAbort.abort();
+  umapAbort = new AbortController();
+  const { signal } = umapAbort;
+
+  function toSvgPoint(clientX, clientY) {
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse());
+  }
+
+  function hideTooltip() { tooltip.style.display = "none"; }
+
+  function splitFile(file) {
+    const slash = file.lastIndexOf("/");
+    return { klasse: file.substring(0, slash), filename: file.substring(slash + 1) };
+  }
+
+  function showTooltipFor(target, e) {
+    const p = points[Number(target.dataset.i)];
+    const rect = wrap.getBoundingClientRect();
+    const { klasse, filename } = splitFile(p.file);
+    const src = `/api/classes/${encodeURIComponent(klasse)}/images/${encodeURIComponent(filename)}/file`;
+
+    if (tooltip.dataset.file !== p.file) {
+      tooltip.innerHTML = `<img src="${src}" loading="lazy"><div class="umap-tooltip-class"></div><div class="umap-tooltip-meta"></div><div class="umap-tooltip-hint">Klicken → Bilder-Übersicht</div>`;
+      tooltip.querySelector(".umap-tooltip-class").textContent = p.class;
+      tooltip.querySelector(".umap-tooltip-meta").textContent = p.perspektive || "";
+      tooltip.dataset.file = p.file;
+    }
+    let left = e.clientX - rect.left + 14;
+    const top = e.clientY - rect.top + 14;
+    if (left + 150 > rect.width) left = e.clientX - rect.left - 164;
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.style.display = "block";
+  }
+
+  // Öffnet das angeklickte Bild in der Daten-Übersicht (eigener Tab, damit die
+  // aktuelle UMAP-Ansicht/Zoomstufe erhalten bleibt) — Zweck: von einem
+  // auffälligen/abseits liegenden Punkt direkt zum Bild springen, um es als evtl.
+  // falsch klassifiziert zu prüfen.
+  function openInGallery(p) {
+    const { klasse, filename } = splitFile(p.file);
+    const url = `/images?klasse=${encodeURIComponent(klasse)}&file=${encodeURIComponent(filename)}`;
+    window.open(url, "_blank");
+  }
+
+  let dragging = false;
+  let dragStart = null;
+  let downAt = null; // {x,y (Client-Px), index}: um einen echten Klick (kaum Bewegung) von einem Pan-Drag zu unterscheiden
+
+  svg.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    const start = toSvgPoint(e.clientX, e.clientY);
+    dragStart = { x: start.x, y: start.y, tx0: view.tx, ty0: view.ty };
+    const hitEl = e.target.closest(".umap-hit");
+    downAt = { x: e.clientX, y: e.clientY, index: hitEl ? Number(hitEl.dataset.i) : null };
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add("is-panning");
+    hideTooltip();
+  }, { signal });
+
+  svg.addEventListener("pointermove", (e) => {
+    if (dragging && dragStart) {
+      const p = toSvgPoint(e.clientX, e.clientY);
+      view.tx = dragStart.tx0 + (p.x - dragStart.x);
+      view.ty = dragStart.ty0 + (p.y - dragStart.y);
+      redraw();
+      return;
+    }
+    const target = e.target.closest(".umap-hit");
+    if (!target) { hideTooltip(); return; }
+    showTooltipFor(target, e);
+  }, { signal });
+
+  const stopDrag = (e) => {
+    if (downAt && downAt.index !== null && e && e.clientX !== undefined) {
+      const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
+      if (moved < 5) openInGallery(points[downAt.index]);
+    }
+    dragging = false;
+    dragStart = null;
+    downAt = null;
+    svg.classList.remove("is-panning");
+    if (e && e.pointerId !== undefined) {
+      try { svg.releasePointerCapture(e.pointerId); } catch (err) { /* schon freigegeben */ }
+    }
+  };
+  svg.addEventListener("pointerup", stopDrag, { signal });
+  svg.addEventListener("pointercancel", stopDrag, { signal });
+  svg.addEventListener("pointerleave", () => { if (!dragging) hideTooltip(); }, { signal });
+
+  svg.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const cursor = toSvgPoint(e.clientX, e.clientY);
+    // Zoomgeschwindigkeit proportional zum tatsächlichen Scroll-Delta (nicht ein
+    // fixer Faktor pro Event) — sonst zoomt ein Trackpad (viele kleine Events pro
+    // Geste) um ein Vielfaches schneller als ein Mausrad (wenige große Events).
+    const factor = Math.exp(-e.deltaY * 0.0025);
+    const newScale = Math.min(UMAP_MAX_SCALE, Math.max(UMAP_MIN_SCALE, view.scale * factor));
+    if (newScale === view.scale) return;
+    const bx = (cursor.x - view.tx) / view.scale;
+    const by = (cursor.y - view.ty) / view.scale;
+    view.tx = cursor.x - bx * newScale;
+    view.ty = cursor.y - by * newScale;
+    view.scale = newScale;
+    redraw();
+    hideTooltip();
+  }, { signal, passive: false });
+}
+</script>
+{% endblock %}

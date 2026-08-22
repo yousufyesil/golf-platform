@@ -1,0 +1,465 @@
+{# @author Yousuf Yesil <yousufyesil@icloud.com> #}
+{% extends "base.html" %}
+{% block title %}Daten · Golf-Plattform{% endblock %}
+{% block content %}
+<h1>Daten verwalten</h1>
+<p class="hint">Klassen sind nach Marke &amp; Baureihe organisiert (z.B. Marke "Volkswagen", Baureihe "Golf",
+  Klasse "GOLF VIII"). Nur handgeprüfte train/test-Bilder + eigene Uploads werden angezeigt. Nach neuen
+  Uploads auf <a href="/models">Modell</a> den Store der betroffenen Baureihe neu generieren.</p>
+
+<div class="card">
+  <h2>Neue Klasse anlegen</h2>
+  <form id="klasse-form" class="inline">
+    <input type="text" id="new-marke" list="marke-options" placeholder="Marke (z.B. Volkswagen)" required>
+    <datalist id="marke-options"></datalist>
+    <input type="text" id="new-baureihe" list="baureihe-options" placeholder="Baureihe (z.B. Polo)" required>
+    <datalist id="baureihe-options"></datalist>
+    <input type="text" id="new-klasse" placeholder="Klasse (z.B. POLO VI)" required>
+    <button type="submit" class="btn">Klasse anlegen</button>
+  </form>
+  <div id="klasse-status"></div>
+</div>
+
+<div class="grid">
+  <div class="fzg-panel">
+    <div class="fzg-header">
+      <span class="fzg-icon">🚗</span>
+      <span class="fzg-title">Fahrzeuge</span>
+      <span class="fzg-badge" id="fzg-total">– Bilder</span>
+    </div>
+    <div class="fzg-search">
+      <input type="text" id="tree-search" placeholder="Marke, Baureihe, Klasse …">
+    </div>
+    <div id="tree"><p class="empty-hint">Lade…</p></div>
+  </div>
+
+  <div>
+    <div class="card" id="detail-toolbar" style="display:none">
+      <div class="toolbar-row">
+        <h2 id="current-class" style="margin:0">Klasse wählen</h2>
+        <div class="toolbar-actions">
+          <button class="btn secondary" id="edit-class-btn">✏️ Bearbeiten</button>
+          <button class="btn secondary" id="download-class-btn">⬇ Download</button>
+          <button class="btn danger" id="delete-class-btn">🗑 Löschen</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="upload-card" style="display:none">
+      <h2>Bilder hochladen</h2>
+      <div class="baureihe-select-row">
+        <label class="hint">Perspektive</label>
+        <select id="upload-perspektive">
+          <option value="">optional</option>
+          <option value="vorne">vorne</option>
+          <option value="schräg_vorne">schräg_vorne</option>
+          <option value="seite">seite</option>
+          <option value="schräg_hinten">schräg_hinten</option>
+          <option value="hinten">hinten</option>
+        </select>
+      </div>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="upload-files" multiple accept=".jpg,.jpeg,.png,.webp,.bmp">
+        <div class="dz-icon">⬆️</div>
+        <div class="dz-title">Bild(er) hierher ziehen oder klicken</div>
+        <div class="dz-hint">JPG, PNG, WEBP, BMP</div>
+      </div>
+      <div id="upload-status"></div>
+    </div>
+
+    <div class="image-grid" id="image-grid"><p class="empty-hint">Links eine Klasse auswählen.</p></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="klasse-edit-backdrop">
+  <div class="modal">
+    <h2>Klasse bearbeiten</h2>
+    <form id="klasse-edit-form" class="modal-form">
+      <label class="hint">Marke</label>
+      <input type="text" id="edit-marke" list="marke-options" required>
+      <label class="hint">Baureihe</label>
+      <input type="text" id="edit-baureihe" list="baureihe-options" required>
+      <label class="hint">Klasse</label>
+      <input type="text" id="edit-klasse" required>
+      <div id="klasse-edit-status"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn secondary" id="klasse-edit-cancel">Abbrechen</button>
+        <button type="submit" class="btn">Speichern</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentClass = null;
+let baureihenData = [];
+const collapsedKeys = new Set(JSON.parse(localStorage.getItem("collapsedTreeKeys") || "[]"));
+
+function saveCollapsed() {
+  localStorage.setItem("collapsedTreeKeys", JSON.stringify([...collapsedKeys]));
+}
+
+function groupByMarke(data) {
+  const map = new Map();
+  for (const b of data) {
+    if (!map.has(b.marke)) map.set(b.marke, { marke: b.marke, baureihen: [], total: 0 });
+    const entry = map.get(b.marke);
+    entry.baureihen.push(b);
+    entry.total += b.bilder_gesamt;
+  }
+  return [...map.values()];
+}
+
+function renderTree() {
+  const markes = groupByMarke(baureihenData);
+  const total = markes.reduce((s, m) => s + m.total, 0);
+  document.getElementById("fzg-total").textContent = `${total} Bilder`;
+
+  const tree = document.getElementById("tree");
+  if (!markes.length) {
+    tree.innerHTML = `<p class="empty-hint">Noch keine Klassen — oben eine anlegen.</p>`;
+    return;
+  }
+
+  tree.innerHTML = markes.map(m => {
+    const markeKey = `marke:${m.marke}`;
+    const markeCollapsed = collapsedKeys.has(markeKey);
+    return `
+    <div class="tree-node" data-key="${escapeHtml(markeKey)}">
+      <div class="tree-row tree-row--marke" data-toggle>
+        <span class="caret">${markeCollapsed ? "▸" : "▾"}</span>
+        <span class="tree-label">${escapeHtml(m.marke)}</span>
+        <span class="tree-count">${m.total}</span>
+      </div>
+      <div class="tree-children ${markeCollapsed ? "hidden" : ""}">
+        ${m.baureihen.map(b => {
+          const bKey = `baureihe:${b.baureihe}`;
+          const bCollapsed = collapsedKeys.has(bKey);
+          return `
+          <div class="tree-node" data-key="${escapeHtml(bKey)}">
+            <div class="tree-row tree-row--baureihe" data-toggle>
+              <span class="caret">${bCollapsed ? "▸" : "▾"}</span>
+              <span class="tree-label">${escapeHtml(b.baureihe)}</span>
+              <span class="tree-count">${b.bilder_gesamt}</span>
+            </div>
+            <div class="tree-children ${bCollapsed ? "hidden" : ""}">
+              ${b.klassen.map(k => `
+                <div class="tree-row tree-row--klasse ${k.name === currentClass ? "is-selected" : ""}" data-class="${escapeHtml(k.name)}">
+                  <span class="radio">${k.name === currentClass ? "✓" : ""}</span>
+                  <span class="tree-label">${escapeHtml(k.name)}</span>
+                  <span class="tree-count">${k.count}</span>
+                </div>`).join("")}
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`;
+  }).join("");
+
+  wireTree();
+  applySearchFilter();
+}
+
+function wireTree() {
+  const tree = document.getElementById("tree");
+
+  tree.querySelectorAll("[data-toggle]").forEach(row => {
+    row.addEventListener("click", () => {
+      const node = row.closest(".tree-node");
+      const children = node.querySelector(":scope > .tree-children");
+      const nowHidden = children.classList.toggle("hidden");
+      row.querySelector(".caret").textContent = nowHidden ? "▸" : "▾";
+      if (nowHidden) collapsedKeys.add(node.dataset.key); else collapsedKeys.delete(node.dataset.key);
+      saveCollapsed();
+    });
+  });
+
+  tree.querySelectorAll(".tree-row--klasse").forEach(row => {
+    row.addEventListener("click", () => selectClass(row.dataset.class));
+  });
+}
+
+function findKlasseInfo(klasse) {
+  for (const b of baureihenData) {
+    if (b.klassen.some(k => k.name === klasse)) return { marke: b.marke, baureihe: b.baureihe };
+  }
+  return null;
+}
+
+let editingKlasse = null;
+
+function openKlasseEditModal(klasse) {
+  const info = findKlasseInfo(klasse);
+  if (!info) return;
+  editingKlasse = klasse;
+  document.getElementById("edit-marke").value = info.marke;
+  document.getElementById("edit-baureihe").value = info.baureihe;
+  document.getElementById("edit-klasse").value = klasse;
+  document.getElementById("klasse-edit-status").innerHTML = "";
+  document.getElementById("klasse-edit-backdrop").classList.remove("hidden");
+}
+
+function closeKlasseEditModal() {
+  document.getElementById("klasse-edit-backdrop").classList.add("hidden");
+  editingKlasse = null;
+}
+
+document.getElementById("klasse-edit-cancel").addEventListener("click", closeKlasseEditModal);
+document.getElementById("klasse-edit-backdrop").addEventListener("click", (e) => {
+  if (e.target.id === "klasse-edit-backdrop") closeKlasseEditModal();
+});
+
+document.getElementById("klasse-edit-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!editingKlasse) return;
+  const marke = document.getElementById("edit-marke").value.trim();
+  const baureihe = document.getElementById("edit-baureihe").value.trim();
+  const newKlasse = document.getElementById("edit-klasse").value.trim();
+  const status = document.getElementById("klasse-edit-status");
+  if (!marke || !baureihe || !newKlasse) return;
+
+  const fd = new FormData();
+  fd.append("marke", marke);
+  fd.append("baureihe", baureihe);
+  fd.append("new_klasse", newKlasse);
+
+  try {
+    await api(`/api/classes/${encodeURIComponent(editingKlasse)}`, { method: "PUT", body: fd });
+    const wasSelected = currentClass === editingKlasse;
+    closeKlasseEditModal();
+    collapsedKeys.delete(`baureihe:${baureihe}`);
+    collapsedKeys.delete(`marke:${marke}`);
+    saveCollapsed();
+    await loadTree(wasSelected ? newKlasse : undefined);
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+async function loadTree(selectAfter, highlightFile) {
+  // Der Sonder-Eintrag "Gesamt" (is_global) ist ein virtueller Store über alle
+  // Klassen hinweg, keine echte Marke/Baureihe -> hier ausblenden, sonst taucht
+  // jede Klasse doppelt im Baum auf und "Gesamt"/"Alle Marken" landen in den
+  // Marke/Baureihe-Vorschlägen.
+  baureihenData = (await api("/api/baureihen")).filter(b => !b.is_global);
+
+  const markes = [...new Set(baureihenData.map(b => b.marke))];
+  const baureihen = [...new Set(baureihenData.map(b => b.baureihe))];
+  document.getElementById("marke-options").innerHTML = markes.map(m => `<option value="${escapeHtml(m)}">`).join("");
+  document.getElementById("baureihe-options").innerHTML = baureihen.map(b => `<option value="${escapeHtml(b)}">`).join("");
+
+  if (selectAfter) {
+    // Baum-Zweig der Zielklasse aufklappen, falls vorher eingeklappt (z.B. Deep-Link
+    // von einem UMAP-Punkt im Modell-Tab) — sonst wäre die Auswahl links unsichtbar.
+    const info = findKlasseInfo(selectAfter);
+    if (info) {
+      collapsedKeys.delete(`marke:${info.marke}`);
+      collapsedKeys.delete(`baureihe:${info.baureihe}`);
+      saveCollapsed();
+    }
+  }
+
+  renderTree();
+  if (selectAfter) selectClass(selectAfter, { highlightFile });
+}
+
+function applySearchFilter() {
+  const q = document.getElementById("tree-search").value.trim().toLowerCase();
+  const tree = document.getElementById("tree");
+  if (!q) {
+    tree.querySelectorAll(".tree-node, .tree-row--klasse").forEach(el => el.classList.remove("search-hidden"));
+    return;
+  }
+
+  tree.querySelectorAll(".tree-node").forEach(markeNode => {
+    let markeVisible = markeNode.querySelector(".tree-row--marke .tree-label").textContent.toLowerCase().includes(q);
+
+    markeNode.querySelectorAll(":scope > .tree-children > .tree-node").forEach(baureiheNode => {
+      let baureiheVisible = baureiheNode.querySelector(".tree-row--baureihe .tree-label").textContent.toLowerCase().includes(q);
+
+      baureiheNode.querySelectorAll(".tree-row--klasse").forEach(klasseRow => {
+        const match = klasseRow.dataset.class.toLowerCase().includes(q) || baureiheVisible || markeVisible;
+        klasseRow.classList.toggle("search-hidden", !match);
+        if (match) baureiheVisible = true;
+      });
+
+      baureiheNode.classList.toggle("search-hidden", !baureiheVisible);
+      if (baureiheVisible) {
+        markeVisible = true;
+        baureiheNode.querySelector(":scope > .tree-children").classList.remove("hidden");
+        baureiheNode.querySelector(".caret").textContent = "▾";
+      }
+    });
+
+    markeNode.classList.toggle("search-hidden", !markeVisible);
+    if (markeVisible) {
+      markeNode.querySelector(":scope > .tree-children").classList.remove("hidden");
+      markeNode.querySelector(".caret").textContent = "▾";
+    }
+  });
+}
+document.getElementById("tree-search").addEventListener("input", applySearchFilter);
+
+function resetDetail() {
+  document.getElementById("detail-toolbar").style.display = "none";
+  document.getElementById("upload-card").style.display = "none";
+  document.getElementById("image-grid").innerHTML = `<p class="empty-hint">Links eine Klasse auswählen.</p>`;
+}
+
+// Bilder aus einem Lot-Import (siehe /lots) tragen die Spalten ihrer Anzeige —
+// im Info-Popup mit anzeigen, damit nachvollziehbar bleibt, aus welcher Anzeige
+// ein Bild stammt und was dort als Modell angegeben war.
+function lotInfo(lot) {
+  if (!lot || !Object.keys(lot).length) return "";
+  const felder = [
+    ["Anzeige", lot.title], ["Marke/Modell", [lot.make, lot.model].filter(Boolean).join(" ")],
+    ["Erstzulassung", lot.first_registration], ["Kraftstoff", lot.fuel],
+    ["Karosserie", lot.body_type], ["lid", lot.lid], ["file_id", lot.file_id],
+  ].filter(([, v]) => v);
+  return felder.map(([k, v]) => `<div><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</div>`).join("");
+}
+
+async function selectClass(klasse, { highlightFile } = {}) {
+  currentClass = klasse;
+  document.querySelectorAll(".tree-row--klasse").forEach(row => {
+    const selected = row.dataset.class === klasse;
+    row.classList.toggle("is-selected", selected);
+    row.querySelector(".radio").textContent = selected ? "✓" : "";
+  });
+
+  document.getElementById("current-class").textContent = klasse;
+  document.getElementById("detail-toolbar").style.display = "block";
+  document.getElementById("upload-card").style.display = "block";
+
+  const grid = document.getElementById("image-grid");
+  grid.innerHTML = `<p class="empty-hint">Lade…</p>`;
+  const images = await api(`/api/classes/${encodeURIComponent(klasse)}/images`);
+  grid.innerHTML = images.length ? images.map(img => `
+    <figure data-file="${escapeHtml(img.filename)}">
+      <img src="/api/classes/${encodeURIComponent(klasse)}/images/${encodeURIComponent(img.filename)}/file" loading="lazy">
+      <div class="img-info-popup hidden">
+        <div><strong>Datei:</strong> ${escapeHtml(img.filename)}</div>
+        <div><strong>Perspektive/Rotation:</strong> ${escapeHtml(img.perspektive)}</div>
+        <div><strong>Quelle:</strong> ${escapeHtml(img.quelle)}</div>
+        ${lotInfo(img.lot)}
+      </div>
+      <figcaption>
+        <button class="info-btn" title="Info">ⓘ</button>
+        <button class="delete-btn" data-file="${escapeHtml(img.filename)}" title="Löschen">✕</button>
+      </figcaption>
+    </figure>`).join("") : `<p class="empty-hint">Keine Bilder in dieser Klasse.</p>`;
+
+  grid.querySelectorAll(".info-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const popup = btn.closest("figure").querySelector(".img-info-popup");
+      const wasHidden = popup.classList.contains("hidden");
+      grid.querySelectorAll(".img-info-popup").forEach(p => p.classList.add("hidden"));
+      popup.classList.toggle("hidden", !wasHidden);
+    });
+  });
+
+  grid.querySelectorAll(".delete-btn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`"${btn.dataset.file}" wirklich löschen?`)) return;
+      await api(`/api/classes/${encodeURIComponent(klasse)}/images/${encodeURIComponent(btn.dataset.file)}`, { method: "DELETE" });
+      selectClass(klasse);
+      loadTree(klasse);
+    });
+  });
+
+  // Sprungziel von außen (z.B. Klick auf einen UMAP-Punkt im Modell-Tab) — das
+  // betreffende Bild ins Bild rücken und kurz hervorheben, statt es in der
+  // ganzen Galerie erst suchen zu müssen.
+  if (highlightFile) {
+    const target = grid.querySelector(`figure[data-file="${CSS.escape(highlightFile)}"]`);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("is-highlighted");
+      setTimeout(() => target.classList.remove("is-highlighted"), 4000);
+    }
+  }
+}
+
+document.getElementById("edit-class-btn").addEventListener("click", () => {
+  if (!currentClass) return;
+  openKlasseEditModal(currentClass);
+});
+
+document.getElementById("download-class-btn").addEventListener("click", () => {
+  if (!currentClass) return;
+  window.location.href = `/api/classes/${encodeURIComponent(currentClass)}/download`;
+});
+
+document.getElementById("delete-class-btn").addEventListener("click", async () => {
+  if (!currentClass) return;
+  if (!confirm(`Klasse "${currentClass}" entfernen? Hochgeladene Bilder dieser Klasse werden gelöscht.`)) return;
+  await api(`/api/classes/${encodeURIComponent(currentClass)}`, { method: "DELETE" });
+  currentClass = null;
+  resetDetail();
+  loadTree();
+});
+
+document.getElementById("klasse-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const marke = document.getElementById("new-marke").value.trim();
+  const baureihe = document.getElementById("new-baureihe").value.trim();
+  const klasse = document.getElementById("new-klasse").value.trim();
+  const status = document.getElementById("klasse-status");
+  if (!marke || !baureihe || !klasse) return;
+
+  const fd = new FormData();
+  fd.append("marke", marke);
+  fd.append("baureihe", baureihe);
+  fd.append("klasse", klasse);
+
+  try {
+    await api("/api/classes", { method: "POST", body: fd });
+    status.innerHTML = `<p class="hint">Klasse "${escapeHtml(klasse)}" angelegt.</p>`;
+    document.getElementById("klasse-form").reset();
+    collapsedKeys.delete(`baureihe:${baureihe}`);
+    collapsedKeys.delete(`marke:${marke}`);
+    saveCollapsed();
+    await loadTree(klasse);
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+async function uploadFiles(files) {
+  if (!currentClass) return;
+  const status = document.getElementById("upload-status");
+  const perspektive = document.getElementById("upload-perspektive").value;
+
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  fd.append("klasse", currentClass);
+  fd.append("perspektive", perspektive);
+
+  status.innerHTML = `<p class="hint">Lade ${files.length} Bild(er) hoch…</p>`;
+  try {
+    const result = await api("/api/images", { method: "POST", body: fd });
+    status.innerHTML = `<p class="hint">${result.saved.length} Bild(er) hochgeladen.` +
+      (result.errors.length ? ` <span class="error-text">${result.errors.length} Fehler: ${escapeHtml(result.errors[0].error)}</span>` : "") + `</p>`;
+    const target = currentClass;
+    await selectClass(target);
+    await loadTree(target);
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+setupDropzone(document.getElementById("dropzone"), uploadFiles);
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".info-btn") && !e.target.closest(".img-info-popup")) {
+    document.querySelectorAll(".img-info-popup:not(.hidden)").forEach(p => p.classList.add("hidden"));
+  }
+});
+
+const initialParams = new URLSearchParams(window.location.search);
+loadTree(initialParams.get("klasse") || undefined, initialParams.get("file") || undefined);
+</script>
+{% endblock %}

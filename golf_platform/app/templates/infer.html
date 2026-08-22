@@ -1,0 +1,112 @@
+{# @author Yousuf Yesil <yousufyesil@icloud.com> #}
+{% extends "base.html" %}
+{% block title %}Inferenz · Golf-Plattform{% endblock %}
+{% block content %}
+<h1>Inferenz</h1>
+<p class="hint">Bild(er) hochladen — bewertet per kNN-Retrieval gegen den Embedding-Store der gewählten Baureihe.</p>
+
+<div class="card">
+  <form id="infer-form" class="inline">
+    <select id="infer-baureihe" required></select>
+    <input type="file" id="infer-files" multiple accept=".jpg,.jpeg,.png,.webp,.bmp" required>
+    <label class="hint">k <input type="number" id="infer-k" value="5" min="1" max="15" style="width:56px"></label>
+    <label class="hint"><input type="radio" name="metric" value="cosine" checked> cosine</label>
+    <label class="hint"><input type="radio" name="metric" value="euclidean"> euclidean</label>
+    <label class="hint" id="group-label" style="display:none">
+      <input type="checkbox" id="infer-group"> Alle Bilder gehören zu einer Anzeige
+    </label>
+    <button type="submit" class="btn">Bewerten</button>
+  </form>
+  <div id="infer-status"></div>
+</div>
+
+<div id="aggregate-card" class="card" style="display:none">
+  <h2>Gesamturteil (confidence-gewichtet aggregiert)</h2>
+  <p><strong id="agg-pred"></strong> · <span id="agg-conf"></span></p>
+  <div id="agg-bars"></div>
+</div>
+
+<div id="results"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadBaureihenOptions() {
+  const data = await api("/api/baureihen");
+  const select = document.getElementById("infer-baureihe");
+  const withStore = data.filter(b => b.store.exists);
+  select.innerHTML = withStore.length
+    ? withStore.map(b => `<option value="${escapeHtml(b.baureihe)}">${escapeHtml(b.baureihe)} (${b.store.n_images} Bilder)</option>`).join("")
+    : `<option value="">Kein Store vorhanden — zuerst auf "Modell" einen bauen</option>`;
+}
+loadBaureihenOptions();
+
+document.getElementById("infer-files").addEventListener("change", (e) => {
+  document.getElementById("group-label").style.display = e.target.files.length > 1 ? "inline-flex" : "none";
+});
+
+document.getElementById("infer-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const files = document.getElementById("infer-files").files;
+  const baureihe = document.getElementById("infer-baureihe").value;
+  const status = document.getElementById("infer-status");
+  if (!files.length || !baureihe) return;
+
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  fd.append("baureihe", baureihe);
+  fd.append("k", document.getElementById("infer-k").value);
+  fd.append("metric", document.querySelector('input[name="metric"]:checked').value);
+  fd.append("group_mode", files.length > 1 && document.getElementById("infer-group").checked ? "true" : "false");
+
+  status.innerHTML = `<p class="hint">Berechne…</p>`;
+  document.getElementById("aggregate-card").style.display = "none";
+  document.getElementById("results").innerHTML = "";
+
+  try {
+    const result = await api("/api/infer", { method: "POST", body: fd });
+    status.innerHTML = "";
+    renderResult(result, files);
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+function renderResult(result, files) {
+  const previews = new Map([...files].map(f => [f.name, URL.createObjectURL(f)]));
+
+  if (result.aggregate) {
+    document.getElementById("aggregate-card").style.display = "block";
+    document.getElementById("agg-pred").textContent = result.aggregate.pred;
+    document.getElementById("agg-conf").textContent = formatPercent(result.aggregate.conf);
+    renderBars(document.getElementById("agg-bars"), result.aggregate.prob, { top: 8, predicted: result.aggregate.pred });
+  }
+
+  const container = document.getElementById("results");
+  container.innerHTML = result.per_image.map((d, i) => `
+    <div class="card result-card">
+      <img src="${previews.get(d.name) || ""}">
+      <div class="result-body">
+        <div class="result-header">
+          <h2>${escapeHtml(d.name)} — ${escapeHtml(d.pred)} (${formatPercent(d.conf)})</h2>
+          <button class="btn secondary expand-btn" data-idx="${i}">Erweitert ▾</button>
+        </div>
+        <div id="bars-${i}"></div>
+        <div class="neighbors-panel hidden" id="neighbors-${i}">
+          <p class="hint">Einbezogene Nachbar-Bilder (k nächste Treffer, nach Ähnlichkeit sortiert):</p>
+          <div class="neighbor-grid" id="neighbor-grid-${i}"></div>
+        </div>
+      </div>
+    </div>`).join("");
+
+  result.per_image.forEach((d, i) => {
+    renderBars(document.getElementById(`bars-${i}`), d.prob, { top: 5, predicted: d.pred });
+    renderNeighbors(document.getElementById(`neighbor-grid-${i}`), d.neighbors);
+    wireExpandToggle(
+      container.querySelector(`.expand-btn[data-idx="${i}"]`),
+      document.getElementById(`neighbors-${i}`),
+    );
+  });
+}
+</script>
+{% endblock %}
