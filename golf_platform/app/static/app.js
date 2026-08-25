@@ -22,6 +22,38 @@ function formatPercent(x) {
   return `${(x * 100).toFixed(1)}%`;
 }
 
+/** Grobe relative Zeitangabe ("vor 4 Min.", "vor 2 Tagen") für Zeitstempel wie store.built_at. */
+function formatRelativeTime(iso) {
+  if (!iso) return "–";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const min = Math.round(diffMs / 60000);
+  if (min < 1) return "gerade eben";
+  if (min < 60) return `vor ${min} Min.`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `vor ${h} Std.`;
+  const d = Math.round(h / 24);
+  return `vor ${d} Tag${d === 1 ? "" : "en"}`;
+}
+
+const RECENT_JUDGMENTS_KEY = "golf_recent_judgments";
+const RECENT_JUDGMENTS_MAX = 8;
+
+/** Merkt ein Klassifikations-Urteil clientseitig (für "Letzte Urteile" im Dashboard). */
+function pushRecentJudgment({ pred, conf }) {
+  const list = getRecentJudgments();
+  list.push({ pred, conf, ts: Date.now() });
+  while (list.length > RECENT_JUDGMENTS_MAX) list.shift();
+  localStorage.setItem(RECENT_JUDGMENTS_KEY, JSON.stringify(list));
+}
+
+function getRecentJudgments() {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_JUDGMENTS_KEY) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
 /**
  * Rendert eine sortierte Konfidenz-Balkenliste (ein Hue, Magnitude via Balkenlänge).
  * probDict: {klasse: wahrscheinlichkeit(0..1)}. Die Top-Klasse wird hervorgehoben

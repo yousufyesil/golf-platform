@@ -43,6 +43,8 @@
           <button class="btn danger" id="delete-class-btn">🗑 Löschen</button>
         </div>
       </div>
+      <div class="klasse-meta" id="klasse-meta"></div>
+      <div class="chip-row" id="perspective-chips"></div>
     </div>
 
     <div class="card" id="upload-card" style="display:none">
@@ -321,24 +323,15 @@ function lotInfo(lot) {
   return felder.map(([k, v]) => `<div><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</div>`).join("");
 }
 
-async function selectClass(klasse, { highlightFile } = {}) {
-  currentClass = klasse;
-  document.querySelectorAll(".tree-row--klasse").forEach(row => {
-    const selected = row.dataset.class === klasse;
-    row.classList.toggle("is-selected", selected);
-    row.querySelector(".radio").textContent = selected ? "✓" : "";
-  });
+let currentImages = [];
+let activePerspektive = "";
 
-  document.getElementById("current-class").textContent = klasse;
-  document.getElementById("detail-toolbar").style.display = "block";
-  document.getElementById("upload-card").style.display = "block";
-
+function renderImageGrid(highlightFile) {
   const grid = document.getElementById("image-grid");
-  grid.innerHTML = `<p class="empty-hint">Lade…</p>`;
-  const images = await api(`/api/classes/${encodeURIComponent(klasse)}/images`);
+  const images = activePerspektive ? currentImages.filter(i => i.perspektive === activePerspektive) : currentImages;
   grid.innerHTML = images.length ? images.map(img => `
     <figure data-file="${escapeHtml(img.filename)}">
-      <img src="/api/classes/${encodeURIComponent(klasse)}/images/${encodeURIComponent(img.filename)}/file" loading="lazy">
+      <img src="/api/classes/${encodeURIComponent(currentClass)}/images/${encodeURIComponent(img.filename)}/file" loading="lazy">
       <div class="img-info-popup hidden">
         <div><strong>Datei:</strong> ${escapeHtml(img.filename)}</div>
         <div><strong>Perspektive/Rotation:</strong> ${escapeHtml(img.perspektive)}</div>
@@ -349,7 +342,7 @@ async function selectClass(klasse, { highlightFile } = {}) {
         <button class="info-btn" title="Info">ⓘ</button>
         <button class="delete-btn" data-file="${escapeHtml(img.filename)}" title="Löschen">✕</button>
       </figcaption>
-    </figure>`).join("") : `<p class="empty-hint">Keine Bilder in dieser Klasse.</p>`;
+    </figure>`).join("") : `<p class="empty-hint">Keine Bilder in dieser Klasse${activePerspektive ? " mit dieser Perspektive" : ""}.</p>`;
 
   grid.querySelectorAll(".info-btn").forEach(btn => {
     btn.addEventListener("click", (e) => {
@@ -364,9 +357,9 @@ async function selectClass(klasse, { highlightFile } = {}) {
   grid.querySelectorAll(".delete-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
       if (!confirm(`"${btn.dataset.file}" wirklich löschen?`)) return;
-      await api(`/api/classes/${encodeURIComponent(klasse)}/images/${encodeURIComponent(btn.dataset.file)}`, { method: "DELETE" });
-      selectClass(klasse);
-      loadTree(klasse);
+      await api(`/api/classes/${encodeURIComponent(currentClass)}/images/${encodeURIComponent(btn.dataset.file)}`, { method: "DELETE" });
+      selectClass(currentClass);
+      loadTree(currentClass);
     });
   });
 
@@ -381,6 +374,55 @@ async function selectClass(klasse, { highlightFile } = {}) {
       setTimeout(() => target.classList.remove("is-highlighted"), 4000);
     }
   }
+}
+
+function renderKlasseMeta(klasse, images) {
+  const perspektiven = [...new Set(images.map(i => i.perspektive).filter(Boolean))];
+  const ausAnzeigen = images.filter(i => i.lot && Object.keys(i.lot).length).length;
+  const info = findKlasseInfo(klasse);
+  const b = info ? baureihenData.find(x => x.baureihe === info.baureihe) : null;
+
+  document.getElementById("klasse-meta").innerHTML = [
+    `${images.length} Bilder`, `${perspektiven.length} Perspektive${perspektiven.length === 1 ? "" : "n"}`,
+    ausAnzeigen ? `${ausAnzeigen} aus Anzeigen` : null,
+    b ? (b.store.exists ? "im Store" : "kein Store") : null,
+  ].filter(Boolean).map(t => `<span>${escapeHtml(t)}</span>`).join("<span>·</span>");
+
+  const counts = new Map();
+  for (const p of perspektiven) counts.set(p, images.filter(i => i.perspektive === p).length);
+  const ordered = [...counts.entries()].sort((a, b2) => b2[1] - a[1]);
+
+  const chips = document.getElementById("perspective-chips");
+  chips.innerHTML = [`<button type="button" class="chip ${activePerspektive === "" ? "is-active" : ""}" data-p="">alle ${images.length}</button>`]
+    .concat(ordered.map(([p, n]) => `<button type="button" class="chip ${activePerspektive === p ? "is-active" : ""}" data-p="${escapeHtml(p)}">${escapeHtml(p)} ${n}</button>`))
+    .join("");
+  chips.querySelectorAll(".chip").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activePerspektive = btn.dataset.p;
+      chips.querySelectorAll(".chip").forEach(c => c.classList.toggle("is-active", c === btn));
+      renderImageGrid();
+    });
+  });
+}
+
+async function selectClass(klasse, { highlightFile } = {}) {
+  currentClass = klasse;
+  activePerspektive = "";
+  document.querySelectorAll(".tree-row--klasse").forEach(row => {
+    const selected = row.dataset.class === klasse;
+    row.classList.toggle("is-selected", selected);
+    row.querySelector(".radio").textContent = selected ? "✓" : "";
+  });
+
+  document.getElementById("current-class").textContent = klasse;
+  document.getElementById("detail-toolbar").style.display = "block";
+  document.getElementById("upload-card").style.display = "block";
+
+  const grid = document.getElementById("image-grid");
+  grid.innerHTML = `<p class="empty-hint">Lade…</p>`;
+  currentImages = await api(`/api/classes/${encodeURIComponent(klasse)}/images`);
+  renderKlasseMeta(klasse, currentImages);
+  renderImageGrid(highlightFile);
 }
 
 document.getElementById("edit-class-btn").addEventListener("click", () => {

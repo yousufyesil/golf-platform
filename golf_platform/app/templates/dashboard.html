@@ -1,260 +1,133 @@
 {# @author Yousuf Yesil <yousufyesil@icloud.com> #}
 {% extends "base.html" %}
-{% block title %}Dashboard · Golf-Plattform{% endblock %}
+{% block title %}Übersicht · Golf-Plattform{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
-<p class="hint">Schnell-Inferenz gegen eine Baureihe, Überblick über Bilder/Klassen und den Zustand der Stores.</p>
+<h1>Übersicht</h1>
+<p class="hint">Zustand der Datenbasis und der Embedding-Stores. Alles mit Store kann klassifiziert werden — alles andere braucht erst einen Store-Build.</p>
 
-<div class="card">
-  <h2>Schnell-Inferenz</h2>
-  <div class="baureihe-select-row">
-    <label class="hint">Baureihe</label>
-    <select id="dz-baureihe"></select>
+<div class="stat-grid">
+  <div class="stat-tile">
+    <div class="micro-label">Klassen</div>
+    <div class="micro-value" id="stat-classes">–</div>
+    <div class="micro-sub" id="stat-classes-sub">&nbsp;</div>
   </div>
-  <div class="dropzone" id="dropzone">
-    <input type="file" id="dz-input" multiple accept=".jpg,.jpeg,.png,.webp,.bmp">
-    <div class="dz-icon">📷</div>
-    <div class="dz-title">Bild(er) hierher ziehen oder klicken zum Auswählen</div>
-    <div class="dz-hint">Mehrere Bilder = eine Anzeige (Ansichten werden confidence-gewichtet aggregiert)</div>
+  <div class="stat-tile">
+    <div class="micro-label">Bilder</div>
+    <div class="micro-value" id="stat-images">–</div>
+    <div class="micro-sub" id="stat-images-sub">&nbsp;</div>
   </div>
-  <div id="dz-status"></div>
+  <div class="stat-tile">
+    <div class="micro-label">Anzeigen offen</div>
+    <div class="micro-value" id="stat-lots-open">–</div>
+    <div class="micro-sub" id="stat-lots-sub">&nbsp;</div>
+  </div>
+  <div class="stat-tile">
+    <div class="micro-label">Ø Trefferquote</div>
+    <div class="micro-value" id="stat-hitrate">–</div>
+    <div class="micro-sub" id="stat-hitrate-sub">&nbsp;</div>
+  </div>
 </div>
 
-<div id="dz-aggregate" class="card" style="display:none">
-  <h2>Gesamturteil</h2>
-  <p><strong id="dz-agg-pred"></strong> · <span id="dz-agg-conf"></span></p>
-  <div id="dz-agg-bars"></div>
-</div>
+<div class="panel-split">
+  <div class="card">
+    <div class="toolbar-row" style="margin-bottom:16.8px">
+      <h2 style="margin:0">Baureihen &amp; Stores</h2>
+      <a href="/models">Stores verwalten &rarr;</a>
+    </div>
+    <div class="rows-list" id="baureihen-rows"><p class="empty-hint">Lade…</p></div>
+  </div>
 
-<div id="dz-results"></div>
-
-<div class="card">
-  <h2>Von Kleinanzeigen-Link klassifizieren</h2>
-  <p class="hint">Anzeigen-Link einfügen — lädt automatisch alle Galerie-Bilder der Anzeige und bewertet sie confidence-gewichtet gegen die gewählte Baureihe.</p>
-  <form id="ka-form" class="inline">
-    <select id="ka-baureihe"></select>
-    <input type="url" id="ka-url" placeholder="https://www.kleinanzeigen.de/s-anzeige/..." required style="flex:1; min-width:280px">
-    <button type="submit" class="btn">Klassifizieren</button>
-  </form>
-  <div id="ka-status"></div>
-</div>
-
-<div id="ka-aggregate" class="card" style="display:none">
-  <h2>Gesamturteil</h2>
-  <p><strong id="ka-agg-pred"></strong> · <span id="ka-agg-conf"></span></p>
-  <div id="ka-agg-bars"></div>
-</div>
-
-<div id="ka-results"></div>
-
-<div class="stat-row">
-  <div class="stat-tile"><div class="label">Klassen</div><div class="value" id="stat-classes">–</div></div>
-  <div class="stat-tile"><div class="label">Bilder gesamt</div><div class="value" id="stat-images">–</div></div>
-  <div class="stat-tile"><div class="label">Baureihen</div><div class="value" id="stat-baureihen">–</div></div>
+  <div class="card">
+    <h2>Nächster Schritt</h2>
+    <p class="hint" style="margin-bottom:16.8px">Aus dem aktuellen Zustand abgeleitet — in dieser Reihenfolge abarbeiten.</p>
+    <div class="next-steps" id="next-steps"><p class="empty-hint">Lade…</p></div>
+  </div>
 </div>
 
 <div class="card">
-  <h2>Baureihen &amp; Stores</h2>
-  <ul class="baureihen-status-list" id="baureihen-list"><li class="empty-hint">Lade…</li></ul>
-  <p class="hint"><a href="/models">Store bauen &rarr;</a> · <a href="/images">Klassen &amp; Bilder verwalten &rarr;</a></p>
+  <div class="toolbar-row" style="margin-bottom:16.8px">
+    <h2 style="margin:0">Letzte Urteile</h2>
+    <a href="/infer">Neu klassifizieren &rarr;</a>
+  </div>
+  <div id="recent-judgments"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let baureihenData = [];
-
 async function loadDashboard() {
-  baureihenData = await api("/api/baureihen");
-  const classes = await api("/api/classes");
+  const [baureihenData, classes, lotStats] = await Promise.all([
+    api("/api/baureihen"), api("/api/classes"), api("/api/lots/stats"),
+  ]);
+
+  const totalImages = classes.reduce((s, c) => s + c.count, 0);
+  const echteBaureihen = baureihenData.filter(b => !b.is_global);
 
   document.getElementById("stat-classes").textContent = classes.length;
-  document.getElementById("stat-images").textContent = classes.reduce((s, c) => s + c.count, 0);
-  document.getElementById("stat-baureihen").textContent = baureihenData.filter(b => !b.is_global).length;
+  document.getElementById("stat-classes-sub").textContent = `über ${echteBaureihen.length} Baureihe${echteBaureihen.length === 1 ? "" : "n"}`;
+  document.getElementById("stat-images").textContent = totalImages;
+  document.getElementById("stat-images-sub").textContent = "insgesamt hochgeladen/importiert";
+  document.getElementById("stat-lots-open").textContent = lotStats.anzeigen_offen;
+  document.getElementById("stat-lots-sub").textContent = lotStats.bilder_fehlend
+    ? `${lotStats.bilder_fehlend} Bilder fehlen` : "alle Bilder vorhanden";
 
-  const withStore = baureihenData.filter(b => b.store.exists);
-  const baureiheOptions = withStore.length
-    ? withStore.map(b => `<option value="${escapeHtml(b.baureihe)}">${escapeHtml(b.baureihe)} (${b.store.n_images} Bilder)</option>`).join("")
-    : `<option value="">Noch kein Store — zuerst auf "Modell" einen bauen</option>`;
-  document.getElementById("dz-baureihe").innerHTML = baureiheOptions;
-  document.getElementById("ka-baureihe").innerHTML = baureiheOptions;
+  const recent = getRecentJudgments();
+  if (recent.length) {
+    const avg = recent.reduce((s, r) => s + r.conf, 0) / recent.length;
+    document.getElementById("stat-hitrate").textContent = formatPercent(avg);
+    document.getElementById("stat-hitrate-sub").textContent = `letzte ${recent.length} Urteile (dieses Gerät)`;
+  } else {
+    document.getElementById("stat-hitrate").textContent = "–";
+    document.getElementById("stat-hitrate-sub").textContent = "noch keine Urteile";
+  }
 
-  const list = document.getElementById("baureihen-list");
-  list.innerHTML = baureihenData.length ? baureihenData.map(b => `
-    <li>
-      <span>${escapeHtml(b.baureihe)} <span class="meta">(${escapeHtml(b.marke)})</span></span>
-      <span class="meta">${b.klassen.length} Klassen · ${b.bilder_gesamt} Bilder ·
-        ${b.store.exists ? `Store: ${b.store.n_images} Bilder` : "kein Store"}</span>
-    </li>`).join("") : `<li class="empty-hint">Noch keine Baureihen angelegt.</li>`;
+  const rows = document.getElementById("baureihen-rows");
+  rows.innerHTML = baureihenData.length ? baureihenData.map(b => `
+    <div class="row-item">
+      <div>
+        <div class="row-name">${escapeHtml(b.baureihe)}</div>
+        <div class="row-meta">${escapeHtml(b.marke)} · ${b.klassen.length} Klasse${b.klassen.length === 1 ? "" : "n"}</div>
+      </div>
+      <div class="row-count">${b.bilder_gesamt}</div>
+      <div class="row-state ${b.store.exists ? "accent" : ""}">${b.store.exists ? "Store aktuell" : "kein Store"}</div>
+      <div class="row-when">${b.store.exists ? formatRelativeTime(b.store.built_at) : ""}</div>
+    </div>`).join("") : `<p class="empty-hint">Noch keine Baureihen angelegt.</p>`;
+
+  const steps = [];
+  if (lotStats.anzeigen_offen > 0) {
+    steps.push({
+      title: `${lotStats.anzeigen_offen} Anzeigen zuordnen`,
+      meta: lotStats.bilder_fehlend ? `${lotStats.bilder_fehlend} Bilder fehlen noch` : "Vorschläge stehen bereit",
+      href: "/lots",
+    });
+  }
+  for (const b of echteBaureihen.filter(x => !x.store.exists)) {
+    steps.push({ title: `${b.baureihe}-Store bauen`, meta: `${b.bilder_gesamt} Bilder, noch kein Store`, href: "/models" });
+  }
+  const stepsEl = document.getElementById("next-steps");
+  stepsEl.innerHTML = steps.length
+    ? steps.slice(0, 4).map((s, i) => `
+        <div class="next-step-item ${i === 0 ? "is-primary" : ""}">
+          <div><div class="title">${escapeHtml(s.title)}</div><div class="meta">${escapeHtml(s.meta)}</div></div>
+          <a href="${s.href}">öffnen &rarr;</a>
+        </div>`).join("")
+    : `<p class="empty-hint">Alles aktuell — keine offenen Aufgaben.</p>`;
+
+  const recentEl = document.getElementById("recent-judgments");
+  recentEl.innerHTML = recent.length
+    ? `<div class="recent-row">${[...recent].reverse().map(r => `
+        <div class="recent-tile">
+          <div class="recent-thumb">${formatRelativeTime(new Date(r.ts).toISOString())}</div>
+          <div class="recent-body">
+            <div class="recent-cls">${escapeHtml(r.pred)}</div>
+            <div class="recent-conf-row">
+              <span class="recent-conf-track"><span class="recent-conf-fill" style="width:${(r.conf * 100).toFixed(1)}%"></span></span>
+              <span class="recent-conf-val">${formatPercent(r.conf)}</span>
+            </div>
+          </div>
+        </div>`).join("")}</div>`
+    : `<p class="empty-hint">Noch keine Klassifikationen auf diesem Gerät — <a href="/infer">jetzt klassifizieren</a>.</p>`;
 }
 loadDashboard();
-
-const dropzone = document.getElementById("dropzone");
-setupDropzone(dropzone, async (files) => {
-  const baureihe = document.getElementById("dz-baureihe").value;
-  const status = document.getElementById("dz-status");
-  if (!baureihe) {
-    status.innerHTML = `<p class="error-text">Erst eine Baureihe mit Store auswählen.</p>`;
-    return;
-  }
-
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  fd.append("baureihe", baureihe);
-  fd.append("k", "5");
-  fd.append("metric", "cosine");
-  fd.append("group_mode", files.length > 1 ? "true" : "false");
-
-  status.innerHTML = `<p class="hint">Berechne…</p>`;
-  document.getElementById("dz-aggregate").style.display = "none";
-  document.getElementById("dz-results").innerHTML = "";
-
-  try {
-    const result = await api("/api/infer", { method: "POST", body: fd });
-    status.innerHTML = "";
-    renderDzResult(result, files);
-  } catch (err) {
-    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
-  }
-});
-
-function renderDzResult(result, files) {
-  const previews = new Map([...files].map(f => [f.name, URL.createObjectURL(f)]));
-  const fileByName = new Map([...files].map(f => [f.name, f]));
-
-  if (result.aggregate) {
-    document.getElementById("dz-aggregate").style.display = "block";
-    document.getElementById("dz-agg-pred").textContent = result.aggregate.pred;
-    document.getElementById("dz-agg-conf").textContent = formatPercent(result.aggregate.conf);
-    renderBars(document.getElementById("dz-agg-bars"), result.aggregate.prob, { top: 8, predicted: result.aggregate.pred });
-  }
-
-  const container = document.getElementById("dz-results");
-  container.innerHTML = result.per_image.map((d, i) => `
-    <div class="card result-card">
-      <img src="${previews.get(d.name) || ""}">
-      <div class="result-body">
-        <div class="result-header">
-          <h2>${escapeHtml(d.name)} — ${escapeHtml(d.pred)} (${formatPercent(d.conf)})</h2>
-          <button class="btn expand-btn" data-idx="${i}">Erweitert ▾</button>
-        </div>
-        <div id="dz-bars-${i}"></div>
-        ${expandedPanelHtml("dz", i, previews.get(d.name) || "")}
-      </div>
-    </div>`).join("");
-
-  result.per_image.forEach((d, i) => {
-    renderBars(document.getElementById(`dz-bars-${i}`), d.prob, { top: 5, predicted: d.pred });
-    renderNeighborGroups(document.getElementById(`dz-neighbor-groups-${i}`), d.neighbors);
-    wireExpandToggle(
-      container.querySelector(`.expand-btn[data-idx="${i}"]`),
-      document.getElementById(`dz-neighbors-${i}`),
-      () => loadHeatmap(
-        document.getElementById(`dz-heatmap-${i}`),
-        document.getElementById(`dz-heatmap-status-${i}`),
-        { file: fileByName.get(d.name) },
-      ),
-    );
-  });
-}
-
-/**
- * Markup der "Erweitert"-Ansicht (Attention-Heatmap + gruppierte Nachbar-Bilder),
- * gemeinsam für die Dropzone- und die Kleinanzeigen-Ergebnisse des Dashboards.
- * prefix unterscheidet die Element-IDs (dz-/ka-), originalSrc ist die Bild-Vorschau
- * (object URL bzw. öffentliche Bild-URL) für die "Original"-Spalte der Heatmap.
- */
-function expandedPanelHtml(prefix, i, originalSrc) {
-  return `
-    <div class="neighbors-panel hidden" id="${prefix}-neighbors-${i}">
-      <div class="expand-section">
-        <div class="expand-section-title">Attention-Heatmap</div>
-        <div class="heatmap-row">
-          <figure class="heatmap-figure">
-            <img src="${originalSrc}">
-            <figcaption>Original</figcaption>
-          </figure>
-          <figure class="heatmap-figure">
-            <img id="${prefix}-heatmap-${i}">
-            <figcaption id="${prefix}-heatmap-status-${i}" class="hint">–</figcaption>
-          </figure>
-        </div>
-      </div>
-      <div class="expand-section">
-        <div class="expand-section-title">Einbezogene Nachbar-Bilder</div>
-        <p class="hint">Die k nächsten Treffer aus dem Store, nach Klasse gruppiert und je Klasse nach Ähnlichkeit sortiert.</p>
-        <div id="${prefix}-neighbor-groups-${i}"></div>
-      </div>
-    </div>`;
-}
-
-document.getElementById("ka-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const baureihe = document.getElementById("ka-baureihe").value;
-  const url = document.getElementById("ka-url").value.trim();
-  const status = document.getElementById("ka-status");
-  if (!baureihe) {
-    status.innerHTML = `<p class="error-text">Erst eine Baureihe mit Store auswählen.</p>`;
-    return;
-  }
-  if (!url) return;
-
-  const fd = new FormData();
-  fd.append("url", url);
-  fd.append("baureihe", baureihe);
-  fd.append("k", "5");
-  fd.append("metric", "cosine");
-
-  status.innerHTML = `<p class="hint">Lade Anzeige &amp; klassifiziere…</p>`;
-  document.getElementById("ka-aggregate").style.display = "none";
-  document.getElementById("ka-results").innerHTML = "";
-
-  try {
-    const result = await api("/api/infer/kleinanzeigen", { method: "POST", body: fd });
-    status.innerHTML = result.ad_title
-      ? `<p class="hint">${escapeHtml(result.ad_title)} — ${result.per_image.length} Bild(er)</p>`
-      : "";
-    renderKaResult(result);
-  } catch (err) {
-    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
-  }
-});
-
-function renderKaResult(result) {
-  if (result.aggregate) {
-    document.getElementById("ka-aggregate").style.display = "block";
-    document.getElementById("ka-agg-pred").textContent = result.aggregate.pred;
-    document.getElementById("ka-agg-conf").textContent = formatPercent(result.aggregate.conf);
-    renderBars(document.getElementById("ka-agg-bars"), result.aggregate.prob, { top: 8, predicted: result.aggregate.pred });
-  }
-
-  const container = document.getElementById("ka-results");
-  container.innerHTML = result.per_image.map((d, i) => `
-    <div class="card result-card">
-      <img src="${result.image_urls[i] || ""}" loading="lazy">
-      <div class="result-body">
-        <div class="result-header">
-          <h2>Bild ${i + 1} — ${escapeHtml(d.pred)} (${formatPercent(d.conf)})</h2>
-          <button class="btn expand-btn" data-idx="${i}">Erweitert ▾</button>
-        </div>
-        <div id="ka-bars-${i}"></div>
-        ${expandedPanelHtml("ka", i, result.image_urls[i] || "")}
-      </div>
-    </div>`).join("");
-
-  result.per_image.forEach((d, i) => {
-    renderBars(document.getElementById(`ka-bars-${i}`), d.prob, { top: 5, predicted: d.pred });
-    renderNeighborGroups(document.getElementById(`ka-neighbor-groups-${i}`), d.neighbors);
-    wireExpandToggle(
-      container.querySelector(`.expand-btn[data-idx="${i}"]`),
-      document.getElementById(`ka-neighbors-${i}`),
-      () => loadHeatmap(
-        document.getElementById(`ka-heatmap-${i}`),
-        document.getElementById(`ka-heatmap-status-${i}`),
-        { image_url: result.image_urls[i] },
-      ),
-    );
-  });
-}
 </script>
 {% endblock %}

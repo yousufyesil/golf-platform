@@ -1,29 +1,74 @@
 {# @author Yousuf Yesil <yousufyesil@icloud.com> #}
 {% extends "base.html" %}
-{% block title %}Inferenz · Golf-Plattform{% endblock %}
+{% block title %}Klassifizieren · Golf-Plattform{% endblock %}
 {% block content %}
-<h1>Inferenz</h1>
-<p class="hint">Bild(er) hochladen — bewertet per kNN-Retrieval gegen den Embedding-Store der gewählten Baureihe.</p>
+<h1>Klassifizieren</h1>
+<p class="hint">Bild(er) hochladen oder einen Kleinanzeigen-Link einfügen — bewertet per kNN-Retrieval gegen den Embedding-Store der gewählten Baureihe. Mehrere Bilder auf einmal werden als Ansichten desselben Fahrzeugs confidence-gewichtet zu einem Urteil zusammengezogen.</p>
 
 <div class="card">
-  <form id="infer-form" class="inline">
-    <select id="infer-baureihe" required></select>
-    <input type="file" id="infer-files" multiple accept=".jpg,.jpeg,.png,.webp,.bmp" required>
-    <label class="hint">k <input type="number" id="infer-k" value="5" min="1" max="15" style="width:56px"></label>
-    <label class="hint"><input type="radio" name="metric" value="cosine" checked> cosine</label>
-    <label class="hint"><input type="radio" name="metric" value="euclidean"> euclidean</label>
-    <label class="hint" id="group-label" style="display:none">
-      <input type="checkbox" id="infer-group"> Alle Bilder gehören zu einer Anzeige
-    </label>
-    <button type="submit" class="btn">Bewerten</button>
-  </form>
+  <div class="infer-toolbar">
+    <div class="segmented" id="mode-tabs">
+      <button type="button" class="is-active" data-mode="drop">Bilder</button>
+      <button type="button" data-mode="link">Anzeigen-Link</button>
+    </div>
+    <div class="settings">
+      <label>Baureihe <select id="infer-baureihe" style="margin-left:4px"></select></label>
+      <label>k <input type="number" id="infer-k" value="5" min="1" max="15"></label>
+      <div class="segmented" id="metric-tabs">
+        <button type="button" class="is-active" data-metric="cosine">cosine</button>
+        <button type="button" data-metric="euclidean">euclidean</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mode-drop">
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="infer-files" multiple accept=".jpg,.jpeg,.png,.webp,.bmp">
+      <div class="dz-icon">📷</div>
+      <div class="dz-title">Bild(er) hierher ziehen oder klicken</div>
+      <div class="dz-hint">JPG, PNG, WEBP, BMP · mehrere Ansichten = ein Fahrzeug</div>
+    </div>
+  </div>
+
+  <div id="mode-link" class="hidden">
+    <form id="ka-form" class="inline" style="margin-bottom:0">
+      <input type="url" id="ka-url" placeholder="https://www.kleinanzeigen.de/s-anzeige/…" required style="flex:1; min-width:300px">
+      <button type="submit" class="btn">Anzeige laden &amp; bewerten</button>
+    </form>
+    <p class="hint" style="margin-top:11.2px">Lädt alle Galerie-Bilder der Anzeige und bewertet sie als eine Gruppe.</p>
+  </div>
+
   <div id="infer-status"></div>
 </div>
 
-<div id="aggregate-card" class="card" style="display:none">
-  <h2>Gesamturteil (confidence-gewichtet aggregiert)</h2>
-  <p><strong id="agg-pred"></strong> · <span id="agg-conf"></span></p>
-  <div id="agg-bars"></div>
+<div id="judgment-section" class="hidden">
+  <div class="infer-layout">
+    <div class="judgment-card">
+      <div class="eyebrow" id="j-eyebrow">Urteil</div>
+      <div class="pred-name" id="j-pred">–</div>
+      <div class="conf-row"><span class="conf-val" id="j-conf">–</span><span class="conf-label">Konfidenz</span></div>
+      <div class="detail-rows" id="j-details"></div>
+      <div class="note-box hidden" id="j-note"></div>
+      <div class="actions">
+        <button class="btn" id="j-heatmaps-btn" type="button">Zu den Details &darr;</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="toolbar-row" style="margin-bottom:16.8px">
+        <div>
+          <h2 style="margin:0">Ansicht gegen Klasse</h2>
+          <p class="hint" style="margin:2.8px 0 0">Jede Zeile ein Bild, jede Spalte eine Klasse — Helligkeit ist die Wahrscheinlichkeit.</p>
+        </div>
+        <div class="segmented" id="view-tabs">
+          <button type="button" class="is-active" data-view="matrix">Matrix</button>
+          <button type="button" data-view="bars">Balken</button>
+        </div>
+      </div>
+      <div id="matrix-view"></div>
+      <div id="bars-view" class="hidden"></div>
+    </div>
+  </div>
 </div>
 
 <div id="results"></div>
@@ -31,61 +76,181 @@
 
 {% block scripts %}
 <script>
+let currentMode = "drop";
+let currentMetric = "cosine";
+let currentView = "matrix";
+let baureihenData = [];
+
+document.getElementById("mode-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  currentMode = btn.dataset.mode;
+  document.querySelectorAll("#mode-tabs button").forEach(b => b.classList.toggle("is-active", b === btn));
+  document.getElementById("mode-drop").classList.toggle("hidden", currentMode !== "drop");
+  document.getElementById("mode-link").classList.toggle("hidden", currentMode !== "link");
+});
+
+document.getElementById("metric-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-metric]");
+  if (!btn) return;
+  currentMetric = btn.dataset.metric;
+  document.querySelectorAll("#metric-tabs button").forEach(b => b.classList.toggle("is-active", b === btn));
+});
+
+document.getElementById("view-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-view]");
+  if (!btn) return;
+  currentView = btn.dataset.view;
+  document.querySelectorAll("#view-tabs button").forEach(b => b.classList.toggle("is-active", b === btn));
+  document.getElementById("matrix-view").classList.toggle("hidden", currentView !== "matrix");
+  document.getElementById("bars-view").classList.toggle("hidden", currentView !== "bars");
+});
+
+document.getElementById("j-heatmaps-btn").addEventListener("click", () => {
+  document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
 async function loadBaureihenOptions() {
-  const data = await api("/api/baureihen");
+  baureihenData = await api("/api/baureihen");
   const select = document.getElementById("infer-baureihe");
-  const withStore = data.filter(b => b.store.exists);
+  const withStore = baureihenData.filter(b => b.store.exists);
   select.innerHTML = withStore.length
     ? withStore.map(b => `<option value="${escapeHtml(b.baureihe)}">${escapeHtml(b.baureihe)} (${b.store.n_images} Bilder)</option>`).join("")
     : `<option value="">Kein Store vorhanden — zuerst auf "Modell" einen bauen</option>`;
 }
 loadBaureihenOptions();
 
-document.getElementById("infer-files").addEventListener("change", (e) => {
-  document.getElementById("group-label").style.display = e.target.files.length > 1 ? "inline-flex" : "none";
-});
+function currentBaureiheInfo() {
+  return baureihenData.find(b => b.baureihe === document.getElementById("infer-baureihe").value);
+}
 
-document.getElementById("infer-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const files = document.getElementById("infer-files").files;
+document.getElementById("infer-files").addEventListener("change", (e) => {
+  if (e.target.files.length) runDropInference(e.target.files);
+});
+setupDropzone(document.getElementById("dropzone"), runDropInference);
+
+async function runDropInference(files) {
   const baureihe = document.getElementById("infer-baureihe").value;
   const status = document.getElementById("infer-status");
-  if (!files.length || !baureihe) return;
-
+  if (!baureihe) {
+    status.innerHTML = `<p class="error-text">Erst eine Baureihe mit Store auswählen.</p>`;
+    return;
+  }
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
   fd.append("baureihe", baureihe);
   fd.append("k", document.getElementById("infer-k").value);
-  fd.append("metric", document.querySelector('input[name="metric"]:checked').value);
-  fd.append("group_mode", files.length > 1 && document.getElementById("infer-group").checked ? "true" : "false");
+  fd.append("metric", currentMetric);
+  fd.append("group_mode", files.length > 1 ? "true" : "false");
 
   status.innerHTML = `<p class="hint">Berechne…</p>`;
-  document.getElementById("aggregate-card").style.display = "none";
+  document.getElementById("judgment-section").classList.add("hidden");
   document.getElementById("results").innerHTML = "";
 
   try {
     const result = await api("/api/infer", { method: "POST", body: fd });
     status.innerHTML = "";
-    renderResult(result, files);
+    const previews = new Map([...files].map(f => [f.name, URL.createObjectURL(f)]));
+    renderInferResult(result, {
+      getPreview: (d) => previews.get(d.name) || "",
+      heatmapFields: (d) => ({ file: [...files].find(f => f.name === d.name) }),
+    });
+  } catch (err) {
+    status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+document.getElementById("ka-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const baureihe = document.getElementById("infer-baureihe").value;
+  const url = document.getElementById("ka-url").value.trim();
+  const status = document.getElementById("infer-status");
+  if (!baureihe) {
+    status.innerHTML = `<p class="error-text">Erst eine Baureihe mit Store auswählen.</p>`;
+    return;
+  }
+  if (!url) return;
+
+  const fd = new FormData();
+  fd.append("url", url);
+  fd.append("baureihe", baureihe);
+  fd.append("k", document.getElementById("infer-k").value);
+  fd.append("metric", currentMetric);
+
+  status.innerHTML = `<p class="hint">Lade Anzeige &amp; klassifiziere…</p>`;
+  document.getElementById("judgment-section").classList.add("hidden");
+  document.getElementById("results").innerHTML = "";
+
+  try {
+    const result = await api("/api/infer/kleinanzeigen", { method: "POST", body: fd });
+    status.innerHTML = result.ad_title
+      ? `<p class="hint">${escapeHtml(result.ad_title)} — ${result.per_image.length} Bild(er)</p>` : "";
+    renderInferResult(result, {
+      getPreview: (d, i) => result.image_urls[i] || "",
+      heatmapFields: (d, i) => ({ image_url: result.image_urls[i] }),
+    });
   } catch (err) {
     status.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
   }
 });
 
-function renderResult(result, files) {
-  const previews = new Map([...files].map(f => [f.name, URL.createObjectURL(f)]));
+function pctPoints(a, b) {
+  return `${((a - b) * 100).toFixed(1)} pp`;
+}
 
-  if (result.aggregate) {
-    document.getElementById("aggregate-card").style.display = "block";
-    document.getElementById("agg-pred").textContent = result.aggregate.pred;
-    document.getElementById("agg-conf").textContent = formatPercent(result.aggregate.conf);
-    renderBars(document.getElementById("agg-bars"), result.aggregate.prob, { top: 8, predicted: result.aggregate.pred });
+function secondHighest(prob, top) {
+  const rest = Object.entries(prob).filter(([c]) => c !== top).sort((a, b) => b[1] - a[1]);
+  return rest.length ? rest[0][1] : 0;
+}
+
+function renderInferResult(result, { getPreview, heatmapFields }) {
+  const perImage = result.per_image;
+  const agg = result.aggregate;
+  const hero = agg || perImage[0];
+  const heroTop = hero.pred;
+
+  pushRecentJudgment({ pred: heroTop, conf: hero.conf });
+
+  const info = currentBaureiheInfo();
+  document.getElementById("j-eyebrow").textContent = agg ? `Urteil · ${perImage.length} Ansichten` : "Urteil";
+  document.getElementById("j-pred").textContent = heroTop;
+  document.getElementById("j-conf").textContent = formatPercent(hero.conf);
+
+  const details = [];
+  details.push(["Abstand zum Zweiten", pctPoints(hero.conf, secondHighest(hero.prob, heroTop))]);
+  if (agg) {
+    const agree = perImage.filter(d => d.pred === agg.pred).length;
+    details.push(["Ansichten einig", `${agree} von ${perImage.length}`]);
+  }
+  const allNeighbors = perImage.flatMap(d => d.neighbors || []);
+  if (allNeighbors.length) {
+    const fromClass = allNeighbors.filter(n => n.class === heroTop).length;
+    details.push(["Nachbarn aus Klasse", `${fromClass} von ${allNeighbors.length}`]);
+  }
+  if (info) details.push(["Store", `${info.baureihe} · ${info.store.n_images}`]);
+  document.getElementById("j-details").innerHTML = details.map(([k, v]) => `
+    <div class="detail-row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`).join("");
+
+  const noteEl = document.getElementById("j-note");
+  const dissenting = agg ? perImage.filter(d => d.pred !== agg.pred) : [];
+  if (dissenting.length) {
+    const first = dissenting[0];
+    noteEl.classList.remove("hidden");
+    noteEl.innerHTML = `Eine Ansicht widerspricht${dissenting.length > 1 ? ` (+${dissenting.length - 1} weitere)` : ""}: <strong>${escapeHtml(first.name)}</strong> tendiert zu ${escapeHtml(first.pred)} (${formatPercent(first.conf)}).`;
+  } else {
+    noteEl.classList.add("hidden");
   }
 
+  const classNames = info ? info.klassen.map(k => k.name) : [...new Set(perImage.flatMap(d => Object.keys(d.prob)))];
+  renderMatrix(document.getElementById("matrix-view"), perImage, classNames, agg ? agg.pred : null);
+  renderBars(document.getElementById("bars-view"), hero.prob, { top: 8, predicted: heroTop });
+
+  document.getElementById("judgment-section").classList.remove("hidden");
+
   const container = document.getElementById("results");
-  container.innerHTML = result.per_image.map((d, i) => `
+  container.innerHTML = perImage.map((d, i) => `
     <div class="card result-card">
-      <img src="${previews.get(d.name) || ""}">
+      <img src="${getPreview(d, i)}">
       <div class="result-body">
         <div class="result-header">
           <h2>${escapeHtml(d.name)} — ${escapeHtml(d.pred)} (${formatPercent(d.conf)})</h2>
@@ -93,20 +258,58 @@ function renderResult(result, files) {
         </div>
         <div id="bars-${i}"></div>
         <div class="neighbors-panel hidden" id="neighbors-${i}">
-          <p class="hint">Einbezogene Nachbar-Bilder (k nächste Treffer, nach Ähnlichkeit sortiert):</p>
-          <div class="neighbor-grid" id="neighbor-grid-${i}"></div>
+          <div class="expand-section">
+            <div class="expand-section-title">Attention-Heatmap</div>
+            <div class="heatmap-row">
+              <figure class="heatmap-figure"><img src="${getPreview(d, i)}"><figcaption>Original</figcaption></figure>
+              <figure class="heatmap-figure"><img id="heatmap-${i}"><figcaption id="heatmap-status-${i}" class="hint">–</figcaption></figure>
+            </div>
+          </div>
+          <div class="expand-section">
+            <div class="expand-section-title">Einbezogene Nachbar-Bilder</div>
+            <div id="neighbor-groups-${i}"></div>
+          </div>
         </div>
       </div>
     </div>`).join("");
 
-  result.per_image.forEach((d, i) => {
+  perImage.forEach((d, i) => {
     renderBars(document.getElementById(`bars-${i}`), d.prob, { top: 5, predicted: d.pred });
-    renderNeighbors(document.getElementById(`neighbor-grid-${i}`), d.neighbors);
+    renderNeighborGroups(document.getElementById(`neighbor-groups-${i}`), d.neighbors);
     wireExpandToggle(
       container.querySelector(`.expand-btn[data-idx="${i}"]`),
       document.getElementById(`neighbors-${i}`),
+      () => loadHeatmap(document.getElementById(`heatmap-${i}`), document.getElementById(`heatmap-status-${i}`), heatmapFields(d, i)),
     );
   });
+}
+
+function renderMatrix(container, perImage, classNames, aggPred) {
+  const cols = `repeat(${Math.max(classNames.length, 1)}, 1fr)`;
+  container.innerHTML = `
+    <div class="matrix-head">
+      <span></span>
+      <div class="matrix-head-labels" style="display:grid;grid-template-columns:${cols};gap:5.6px">
+        ${classNames.map(c => `<span title="${escapeHtml(c)}">${escapeHtml(c.length > 8 ? c.slice(0, 7) + "…" : c)}</span>`).join("")}
+      </div>
+      <span></span>
+    </div>
+    ${perImage.map(d => {
+      const top = Object.entries(d.prob).sort((a, b) => b[1] - a[1])[0][0];
+      const flagged = aggPred && d.pred !== aggPred;
+      return `
+      <div class="matrix-row ${flagged ? "is-flagged" : ""}">
+        <div class="matrix-row-label">${escapeHtml(d.name)}${flagged ? " ⚠" : ""}</div>
+        <div class="matrix-cells" style="display:grid;grid-template-columns:${cols};gap:5.6px">
+          ${classNames.map(c => {
+            const p = d.prob[c] || 0;
+            const isTop = c === top;
+            return `<span class="matrix-cell ${isTop ? "is-top" : ""}" style="background:color-mix(in srgb, var(--color-accent) ${Math.max(4, Math.round(p * 90))}%, transparent)" title="${escapeHtml(c)}: ${formatPercent(p)}"></span>`;
+          }).join("")}
+        </div>
+        <div class="matrix-row-value">${formatPercent(d.prob[top])}</div>
+      </div>`;
+    }).join("")}`;
 }
 </script>
 {% endblock %}
